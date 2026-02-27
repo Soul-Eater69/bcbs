@@ -46,4 +46,21 @@ def test_vector_search():
     assert len(docs) > 0 and isinstance(docs[0], Document)
 
     for doc in docs:
+        print(doc.metadata)
         print(doc.metadata.get("entity_name"), "|", doc.page_content[:100])
+
+
+from impact_analysis.vector_client import IDPAzureSearchRetriever
+from langchain_core.documents import Document
+
+retriever = IDPAzureSearchRetriever(
+    index_name="idp_kg_data",
+    search_type="semantic",
+    semantic_configuration_name="default",
+)
+
+docs = retriever.invoke(input="Claim Management")
+
+assert len(docs) > 0 and isinstance(docs[0], Document)
+print(f"SUCCESS: got {len(docs)} docs")
+print(docs[0].metadata)
