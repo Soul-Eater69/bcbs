@@ -1,0 +1,14 @@
+Subject: Follow up from today’s review
+
+Hi Anupam, Eldhose, and Sarath,
+
+I just wanted to follow up on the discussion from today’s review about the datatype for ground truth and augmented nodes. I had used List[Dict[str, Any]] based on the understanding at that point and a quick internal check, assuming we could adjust once the final interface was clear. I’m absolutely fine making changes to match what’s expected.
+
+I also wanted to share something more generally. It’s been about a month since I joined, and I’m still getting fully in sync with how things are being handled across teams. With the CST–IST time difference, it hasn’t always been easy to quickly connect and clarify smaller questions before proceeding. Because of that, a few assumptions or interpretations end up getting discussed later during reviews instead of earlier.
+
+I really want to make sure I’m aligned and contributing in the right way. If possible, maybe we can figure out a slightly more predictable overlap time or a short recurring sync so it’s easier to stay connected. I think that would help avoid these situations and make things smoother overall.
+
+Happy to discuss further.
+
+Thanks,
+Mahesh
