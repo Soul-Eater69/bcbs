@@ -1,219 +1,257 @@
+from __future__ import annotations
+
 import re
-from collections import defaultdict
-from typing import List, Dict, Tuple, Optional
+from typing import List, Optional, Tuple
 
 from langchain_core.documents import Document
+from rapidfuzz import fuzz
+
 from impact_analysis.vector_client import IDPAzureSearchRetriever
 
-# Optional: RapidFuzzy rerank (pip install rapidfuzzy)
-try:
-    from rapidfuzzy import fuzz
-    _RAPIDFUZZY_OK = True
-except Exception:
-    _RAPIDFUZZY_OK = False
 
+# ─────────────────────────────────────────────────────────────
+# PIPELINE:
+# ① vocab match (substring → anchor-guarded fuzzy)
+# ② BM25 per-term (precision) + BM25 on response (recall)
+# ③ merge + dedupe
+# ④ BM25 relative threshold (top * 0.70) + MIN_KEEP safety
+# ⑤ fuzzy verify (loose) on chunk snippet
+#    - fallback: if fuzzy drops everything, return narrowed BM25 results
+# ─────────────────────────────────────────────────────────────
 
 INDEX_NAME      = "idp_kg_data"
 SEMANTIC_CONFIG = "default"
-TOP_K           = 10
 
-# BM25 candidate pool size per query (bigger = better recall, slower)
-CANDIDATES_PER_QUERY = 25
+BM25_K_RESPONSE     = 25
+BM25_K_PER_TERM     = 3
+FINAL_K             = 10
 
-# How many lexical queries to derive from the response
-MAX_QUERIES = 6
+BM25_REL_CUTOFF     = 0.70
+MIN_KEEP            = 5
 
-# RapidFuzzy settings (only used if enabled)
-USE_RAPIDFUZZY_RERANK = True
-FUZZY_WEIGHT = 0.45      # blend weight for fuzzy score
-BM25_WEIGHT  = 0.55      # blend weight for bm25 agg score
-FUZZY_THRESHOLD = 65     # 0..100, drop candidates below this (optional)
+MAX_MATCHED_TERMS   = 20    # cap BM25 calls from vocab lane
+
+FUZZY_VERIFY_CUTOFF = 50
+VERIFY_CHUNK_WINDOW = 1200
+
+VOCAB_FUZZ_CUTOFF   = 85
 
 
-def extract_mentioned_docs(response: str) -> List[Document]:
+def extract_mentioned_docs(
+    response_text: str,
+    vocabulary: Optional[List[str]] = None,
+    final_k: int = FINAL_K,
+) -> List[Document]:
+    """Given an LLM response, return the source chunks the retriever likely used."""
+    matched_terms = _match_vocab_terms(response_text, vocabulary or [])
+
+    term_docs = _bm25_per_term(matched_terms) if matched_terms else []
+    resp_docs = _bm25_full_response(response_text, matched_terms)
+
+    candidates = _dedupe(term_docs + resp_docs)
+    narrowed   = _bm25_threshold(candidates)
+    verified   = _fuzzy_verify(response_text, narrowed)
+
+    # Fallback: if fuzzy verify drops everything, return BM25-narrowed set
+    if not verified:
+        return narrowed[:final_k]
+
+    return verified[:final_k]
+
+
+def load_vocabulary(filepath: str) -> List[str]:
+    """Load entity names from sightline_vocabulary.txt, one term per line."""
+    with open(filepath, encoding="utf-8") as f:
+        return [line.strip().strip('"') for line in f if line.strip()]
+
+
+# ── Vocab matching ────────────────────────────────────────────────────────────
+
+def _anchor_tokens(term_norm: str) -> List[str]:
+    """Words of length >= 4 from the term — used as cheap overlap guard before fuzzy."""
+    return [w for w in term_norm.split() if len(w) >= 4]
+
+
+def _match_vocab_terms(response_text: str, vocabulary: List[str]) -> List[str]:
     """
-    Best-effort attribution from only the final LLM response.
-
-    1) Build a few lexical queries from response
-    2) Run BM25-style keyword search (Azure AI Search "simple")
-    3) Aggregate scores across queries
-    4) Optional RapidFuzzy rerank over candidate texts (cheap, no sklearn)
+    Substring match first (fast, high precision).
+    Fuzzy only runs if: term was missed AND passes an overlap guard.
+    Capped at MAX_MATCHED_TERMS to bound BM25 calls.
     """
-    clean = _clean_response(response)
-    queries = _build_queries(clean, max_queries=MAX_QUERIES)
+    resp_norm = _normalize(response_text)
+    matched: List[str] = []
+    seen: set[str] = set()
 
-    candidates, bm25_scores = _bm25_aggregate(queries)
-
-    if not candidates:
-        return []
-
-    # Optional: local rerank only across the small candidate set
-    if USE_RAPIDFUZZY_RERANK and _RAPIDFUZZY_OK:
-        candidates = _rapidfuzzy_rerank(clean, candidates, bm25_scores)
-
-    # Sort by final score and return top-k
-    candidates.sort(key=lambda d: bm25_scores[_doc_key(d)], reverse=True)
-    out = candidates[:TOP_K]
-
-    # Attach final score to metadata
-    for d in out:
-        d.metadata["attribution_score"] = float(bm25_scores[_doc_key(d)])
-
-    return out
-
-
-# -------------------------
-# Helpers
-# -------------------------
-
-def _clean_response(text: str) -> str:
-    text = re.sub(r"\[\d+\]", "", text)   # remove citation markers like [12]
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
-
-
-def _build_queries(text: str, max_queries: int = 6) -> List[str]:
-    """
-    Keep this minimal:
-      - whole response (truncated)
-      - a few high-signal phrases (quoted strings, Capitalized multi-word phrases, snake_case IDs)
-    """
-    queries: List[str] = []
-
-    # Query 1: full response (bounded length)
-    queries.append(_truncate(text, 800))
-
-    quoted = re.findall(r'"([^"]{3,80})"', text)
-    caps = re.findall(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,5})\b", text)
-    ids = [w for w in re.findall(r"\b[a-zA-Z_]{3,40}\b", text) if "_" in w]
-
-    # prefer longer/more specific
-    pool = []
-    pool += sorted(set(quoted), key=len, reverse=True)
-    pool += sorted(set(caps), key=len, reverse=True)
-    pool += sorted(set(ids), key=len, reverse=True)
-
-    for item in pool:
-        q = item.strip()
-        if len(q) >= 4:
-            queries.append(q)
-        if len(queries) >= max_queries:
+    for term in vocabulary:
+        if len(matched) >= MAX_MATCHED_TERMS:
             break
 
-    # dedupe, preserve order
-    seen = set()
-    out = []
-    for q in queries:
-        if q not in seen:
-            seen.add(q)
-            out.append(q)
-    return out[:max_queries]
+        t = term.strip()
+        if not t:
+            continue
+
+        t_norm = _normalize(t)
+        if not t_norm:
+            continue
+
+        # 1) Substring match
+        if t_norm in resp_norm:
+            if t_norm not in seen:
+                seen.add(t_norm)
+                matched.append(t)
+            continue
+
+        # 2) Overlap guard before fuzzy:
+        anchors = _anchor_tokens(t_norm)
+        tokens = t_norm.split()
+        should_fuzzy = (anchors and any(a in resp_norm for a in anchors)) or (not anchors and any(tok in resp_norm for tok in tokens))
+
+        # 3) Fuzzy fallback (correct direction: short term vs long response)
+        if should_fuzzy and fuzz.partial_ratio(t_norm, resp_norm) >= VOCAB_FUZZ_CUTOFF:
+            if t_norm not in seen:
+                seen.add(t_norm)
+                matched.append(t)
+
+    return matched
 
 
-def _bm25_aggregate(queries: List[str]) -> Tuple[List[Document], Dict[str, float]]:
-    """
-    Runs Azure keyword search for each query and aggregates (normalized) scores per doc.
-    """
-    retriever = IDPAzureSearchRetriever(
-        index_name=INDEX_NAME,
-        search_type="simple",  # BM25-like keyword scoring in Azure Search
-        semantic_configuration_name=SEMANTIC_CONFIG,
-        k=CANDIDATES_PER_QUERY,
-    )
+# ── BM25 ──────────────────────────────────────────────────────────────────────
 
-    docs_by_key: Dict[str, Document] = {}
-    agg_scores: Dict[str, float] = defaultdict(float)
-
-    for q in queries:
-        results = retriever.invoke(input=q) or []
-
-        # Normalize within this query so long queries don't dominate
-        raw = [_get_search_score(d) for d in results]
-        max_s = max(raw) if raw else 0.0
-        denom = max_s if max_s > 0 else 1.0
-
-        for d in results:
-            key = _doc_key(d)
-            docs_by_key[key] = d
-            agg_scores[key] += (_get_search_score(d) / denom)
-
-    return list(docs_by_key.values()), agg_scores
-
-
-def _rapidfuzzy_rerank(query_text: str, docs: List[Document], scores: Dict[str, float]) -> List[Document]:
-    """
-    Cheap local rerank:
-      - compute fuzzy similarity between response text and each doc's representative text
-      - blend it into the aggregated BM25 score
-    """
-    # Scale BM25 scores roughly into 0..1
-    bm25_max = max(scores.values()) if scores else 1.0
-    bm25_max = bm25_max if bm25_max > 0 else 1.0
-
-    for d in docs:
-        key = _doc_key(d)
-        bm25_norm = float(scores.get(key, 0.0)) / bm25_max
-
-        rep = _doc_rep_text(d)
-        # RapidFuzzy returns 0..100
-        fuzzy = float(fuzz.token_set_ratio(query_text, rep))
-
-        # Optionally drop very weak fuzzy matches (can help precision)
-        if fuzzy < FUZZY_THRESHOLD:
-            fuzzy_norm = 0.0
-        else:
-            fuzzy_norm = fuzzy / 100.0
-
-        final = (BM25_WEIGHT * bm25_norm) + (FUZZY_WEIGHT * fuzzy_norm)
-
-        # Store final blended score back into scores dict
-        scores[key] = final
-
+def _bm25_per_term(terms: List[str]) -> List[Document]:
+    """One BM25 query per vocab term — canonical name ranks its doc at position 1."""
+    retriever = _retriever(BM25_K_PER_TERM)
+    docs: List[Document] = []
+    for term in terms:
+        docs.extend(retriever.invoke(term))
     return docs
 
 
-def _doc_rep_text(doc: Document) -> str:
+def _bm25_full_response(response_text: str, matched_terms: List[str]) -> List[Document]:
     """
-    What to fuzzy-match against. Prefer titles/headers if you have them, else content prefix.
-    Tune keys to your schema.
+    BM25 on response — uses first 800 chars,
+    and appends matched terms that appear beyond the window.
     """
-    md = doc.metadata or {}
-    parts = []
+    query  = _truncate(response_text)
+    q_norm = _normalize(query)
 
-    for k in ("title", "document_title", "source", "file_name", "entity_name"):
-        v = md.get(k)
-        if isinstance(v, str) and v.strip():
-            parts.append(v.strip())
+    for term in matched_terms:
+        t_norm = _normalize(term)
+        if t_norm and t_norm not in q_norm:
+            query  += f" {term}"
+            q_norm += f" {t_norm}"
 
-    if doc.page_content:
-        parts.append(doc.page_content[:1500])  # keep it bounded
-
-    rep = " | ".join(parts)
-    rep = re.sub(r"\s+", " ", rep).strip()
-    return rep
+    return _retriever(BM25_K_RESPONSE).invoke(query)
 
 
-def _get_search_score(doc: Document) -> float:
-    """
-    Adjust this if your wrapper stores Azure score in a different metadata key.
-    """
-    md = doc.metadata or {}
-    for k in ("@search.score", "search_score", "score"):
-        v = md.get(k)
-        if isinstance(v, (int, float)):
-            return float(v)
-    return 0.0
+# ── Threshold ─────────────────────────────────────────────────────────────────
+
+def _bm25_threshold(docs: List[Document]) -> List[Document]:
+    """Relative threshold: keep docs >= top_score * 0.70. Falls back to top-k if scores missing."""
+    if not docs:
+        return []
+
+    sorted_docs = sorted(docs, key=_bm25_score, reverse=True)
+    top_score   = _bm25_score(sorted_docs[0])
+
+    # Score unavailable -> skip thresholding
+    if top_score == 0.0:
+        return sorted_docs[:min(MIN_KEEP, len(sorted_docs))]
+
+    cutoff = top_score * BM25_REL_CUTOFF
+    kept   = [d for d in sorted_docs if _bm25_score(d) >= cutoff]
+
+    if len(kept) < min(MIN_KEEP, len(sorted_docs)):
+        kept = sorted_docs[:min(MIN_KEEP, len(sorted_docs))]
+
+    return kept
 
 
-def _doc_key(doc: Document) -> str:
-    md = doc.metadata or {}
-    return (
-        md.get("id")
-        or md.get("chunk_id")
-        or md.get("source")
-        or (doc.page_content[:80] if doc.page_content else "unknown")
+# ── Fuzzy verify ──────────────────────────────────────────────────────────────
+
+def _fuzzy_verify(response_text: str, docs: List[Document]) -> List[Document]:
+    """Drop obvious mismatches. Verifies on chunk snippet not full content."""
+    if not docs:
+        return []
+
+    resp_n = _normalize(response_text)
+    scored: List[Tuple[int, Document]] = []
+
+    for doc in docs:
+        snippet = _normalize((doc.page_content or "")[:VERIFY_CHUNK_WINDOW])
+        score   = fuzz.token_set_ratio(resp_n, snippet)
+        doc.metadata["fuzzy_score"] = score
+        if score >= FUZZY_VERIFY_CUTOFF:
+            scored.append((score, doc))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [d for _, d in scored]
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _retriever(k: int) -> IDPAzureSearchRetriever:
+    return IDPAzureSearchRetriever(
+        index_name=INDEX_NAME,
+        semantic_configuration_name=SEMANTIC_CONFIG,
+        search_type="simple",
+        k=k,
     )
 
 
-def _truncate(s: str, n: int) -> str:
-    return s if len(s) <= n else s[:n]
+def _normalize(s: str) -> str:
+    s = re.sub(r"\[\d+\]", "", s)          # strip citation markers like [1]
+    s = re.sub(r"[^\w\s]", " ", s)         # strip punctuation noise
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _truncate(text: str, max_chars: int = 800) -> str:
+    return re.sub(r"\s+", " ", text[:max_chars]).strip()
+
+
+def _bm25_score(doc: Document) -> float:
+    """
+    Robust score getter:
+    - prefer normalized 'bm25_score' (if your converter sets it)
+    - else fallback to raw keys from backend
+    """
+    md = doc.metadata or {}
+    for key in ("bm25_score", "@search.scores", "@search.score", "score", "search_score"):
+        val = md.get(key)
+        if isinstance(val, (int, float)):
+            return float(val)
+    return 0.0
+
+
+def _dedupe(docs: List[Document]) -> List[Document]:
+    seen: set = set()
+    out: List[Document] = []
+    for doc in docs:
+        md  = doc.metadata or {}
+        key = md.get("chunk_id") or md.get("id") or md.get("source") or doc.page_content[:200]
+        if key not in seen:
+            seen.add(key)
+            out.append(doc)
+    return out
+
+
+
+VOCAB_PATH = "sightline_vocabulary.txt"  # adjust path if needed
+
+if __name__ == "__main__":
+    vocab = load_vocabulary(VOCAB_PATH)
+
+    response_text = """
+    Q: Describe Claim Management Capability
+    Overview: Claim Management is the capability for receiving and resolving payment requests...
+    Key Components: Claim Acquisition, Claim Data Management, Claim Payment...
+    """
+
+    docs = extract_mentioned_docs(response_text, vocabulary=vocab, final_k=10)
+
+    print("\n=== RESULTS ===")
+    for i, d in enumerate(docs, 1):
+        md = d.metadata or {}
+        print(f"\n[{i}] score={md.get('bm25_score') or md.get('@search.scores') or md.get('@search.score')}")
+        print(f"source={md.get('source') or md.get('id') or md.get('chunk_id')}")
+        print(f"fuzzy={md.get('fuzzy_score')}")
+        print("snippet:", (d.page_content or "")[:250].replace("\n", " "))
