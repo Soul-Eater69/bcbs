@@ -1,89 +1,54 @@
-from __future__ import annotations
-
 import re
-from typing import List, Tuple, Dict, Optional
-
+from typing import List, Dict, Tuple
 from langchain_core.documents import Document
-from rapidfuzz import fuzz
-
 from impact_analysis.vector_client import IDPAzureSearchRetriever
-
+from rapidfuzz import fuzz
 
 INDEX_NAME = "idp_kg_data"
 SEMANTIC_CONFIG = "default"
 
-# Candidate retrieval sizes
-BM25_K = 30
-VEC_K  = 30
+PER_CITATION_K_BM25 = 5
+PER_CITATION_K_VEC  = 3   # optional
+FINAL_K = 15
+VERIFY_WINDOW = 800
+FUZZY_CUTOFF = 40
 
-# Final selection
-FINAL_K = 10
-MIN_KEEP = 5
+CIT_RE = re.compile(r"\[(\d+)\]")
 
-# Fuzzy verification
-VERIFY_WINDOW = 1200
-FUZZY_CUTOFF = 45  # loose; avoid dropping real used chunks
+def _normalize(s: str) -> str:
+    s = re.sub(r"\[\d+\]", "", s)
+    s = re.sub(r"[^\w\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip().lower()
 
-
-def extract_mentioned_docs(response: str) -> List[Document]:
+def split_by_citations(response: str) -> Dict[str, str]:
     """
-    Given an LLM response string, return the list of source docs/chunks that
-    were most likely referenced/described in the response.
-
-    Approach:
-      1) Candidate generation: BM25 + Vector on the response
-      2) Merge + dedupe
-      3) Verify/rerank with fuzzy similarity against chunk snippet
-      4) Return top docs (keep at least MIN_KEEP)
+    Build {citation_id: text_snippet} by collecting lines/sentences that contain [n].
+    Works well for your markdown bullets where citations appear at line ends.
     """
-    # 1) Retrieve candidates
-    bm25_docs = _retrieve(response, search_type="simple", k=BM25_K)
-    vec_docs  = _retrieve(response, search_type="semantic", k=VEC_K)
+    buckets: Dict[str, List[str]] = {}
 
-    # 2) Merge + dedupe
-    candidates = _dedupe(bm25_docs + vec_docs)
+    # split by lines first (bullets/headings)
+    for line in response.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for cid in CIT_RE.findall(line):
+            buckets.setdefault(cid, []).append(line)
 
-    # 3) Verify/rerank (fuzzy)
-    ranked = _fuzzy_rerank(response, candidates)
+    # join bucket text
+    return {cid: " ".join(lines) for cid, lines in buckets.items()}
 
-    # 4) Filter loosely but keep minimum
-    kept = [d for s, d in ranked if s >= FUZZY_CUTOFF]
-    if len(kept) < min(MIN_KEEP, len(ranked)):
-        kept = [d for _, d in ranked[:min(MIN_KEEP, len(ranked))]]
-
-    return kept[:FINAL_K]
-
-
-# ─────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────
-
-def _retrieve(text: str, search_type: str, k: int) -> List[Document]:
-    retriever = IDPAzureSearchRetriever(
+def _retriever(search_type: str, k: int) -> IDPAzureSearchRetriever:
+    return IDPAzureSearchRetriever(
         index_name=INDEX_NAME,
         semantic_configuration_name=SEMANTIC_CONFIG,
         search_type=search_type,
         k=k,
     )
-    # Use a truncated query to avoid super long payloads, but keep enough signal
-    query = _truncate(text, 1200)
-    return retriever.invoke(query)
-
-
-def _normalize(s: str) -> str:
-    s = re.sub(r"\[\d+\]", "", s)          # remove citation markers
-    s = re.sub(r"[^\w\s]", " ", s)         # remove punctuation noise
-    return re.sub(r"\s+", " ", s).strip().lower()
-
-
-def _truncate(text: str, max_chars: int) -> str:
-    return re.sub(r"\s+", " ", text[:max_chars]).strip()
-
 
 def _doc_key(d: Document) -> str:
     md = d.metadata or {}
     return str(md.get("chunk_id") or md.get("id") or md.get("source") or md.get("node_id") or d.page_content[:200])
-
 
 def _dedupe(docs: List[Document]) -> List[Document]:
     seen = set()
@@ -96,33 +61,48 @@ def _dedupe(docs: List[Document]) -> List[Document]:
         out.append(d)
     return out
 
+def extract_mentioned_docs(response: str, use_semantic: bool = True) -> List[Document]:
+    """
+    Citation-aware doc extraction:
+    - For each citation bucket, query only that local snippet.
+    - Retrieve small top-k, rerank by fuzzy similarity to the snippet.
+    """
+    buckets = split_by_citations(response)
 
-def _fuzzy_rerank(response: str, docs: List[Document]) -> List[Tuple[int, Document]]:
-    resp_n = _normalize(response)
-    scored: List[Tuple[int, Document]] = []
+    # If no citations exist, fallback to using only the Q line or first 300 chars
+    if not buckets:
+        q = response.strip().splitlines()[0][:300]
+        buckets = {"0": q}
 
-    for d in docs:
-        snippet = _normalize((d.page_content or "")[:VERIFY_WINDOW])
-        score = fuzz.token_set_ratio(resp_n, snippet)
-        d.metadata["fuzzy_score"] = score
-        scored.append((score, d))
+    all_docs: List[Document] = []
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return scored
+    for cid, snippet in buckets.items():
+        bm25 = _retriever("simple", PER_CITATION_K_BM25).invoke(snippet)
 
+        docs = list(bm25)
+        if use_semantic:
+            vec = _retriever("semantic", PER_CITATION_K_VEC).invoke(snippet)
+            docs.extend(vec)
 
-# ─────────────────────────────────────────────────────────────
-# Precision/Recall helper
-# ─────────────────────────────────────────────────────────────
+        docs = _dedupe(docs)
 
-def precision_recall(pred_docs: List[Document], gold_docs: List[Document]) -> Dict[str, float]:
-    pred_ids = {_doc_key(d) for d in pred_docs}
-    gold_ids = {_doc_key(d) for d in gold_docs}
+        # fuzzy rerank vs snippet (not entire response)
+        sn = _normalize(snippet)
+        scored: List[Tuple[int, Document]] = []
+        for d in docs:
+            dn = _normalize((d.page_content or "")[:VERIFY_WINDOW])
+            score = fuzz.token_set_ratio(sn, dn)
+            d.metadata["snippet_fuzzy_score"] = score
+            d.metadata["citation_id"] = cid
+            scored.append((score, d))
 
-    if not pred_ids and not gold_ids:
-        return {"precision": 1.0, "recall": 1.0}
+        scored.sort(key=lambda x: x[0], reverse=True)
 
-    inter = pred_ids & gold_ids
-    precision = len(inter) / len(pred_ids) if pred_ids else 0.0
-    recall    = len(inter) / len(gold_ids) if gold_ids else 0.0
-    return {"precision": precision, "recall": recall}
+        # keep a couple best per citation, but only if not totally off
+        kept = [d for s, d in scored if s >= FUZZY_CUTOFF][:3]
+        if not kept:
+            kept = [d for _, d in scored[:1]]  # at least 1 per citation
+
+        all_docs.extend(kept)
+
+    return _dedupe(all_docs)[:FINAL_K]
