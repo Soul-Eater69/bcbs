@@ -1,265 +1,211 @@
-# mentioned_docs_hybrid.py
 from __future__ import annotations
 
 import re
-from typing import List, Tuple, Optional, Dict
+from typing import List, Set, Tuple, Dict, Optional
 
-from langchain_core.documents import Document
 from rapidfuzz import fuzz
+from langchain_core.documents import Document
 
 from impact_analysis.vector_client import IDPAzureSearchRetriever
 
 
-# ─────────────────────────────────────────────────────────────
-# Goal:
-# Given an LLM response, approximate which chunks/docs were "used/mentioned"
-# WITHOUT logs, using only:
-#   - 1 BM25 call (simple)
-#   - 1 semantic/vector call (semantic)
-# Then a lightweight verifier to drop Jira/user-story noise.
-#
-# Total Azure calls: 2 (fixed).
-# ─────────────────────────────────────────────────────────────
-
 INDEX_NAME = "idp_kg_data"
 SEMANTIC_CONFIG = "default"
 
-# candidates from each retriever (2 calls total)
-K_BM25 = 40
-K_VEC  = 40
+# fuzzy matching
+VOCAB_FUZZ_CUTOFF = 85       # 80–88 is typical; 85 is a good start
+MAX_MATCHED_TERMS = 20       # cap to avoid too many filter queries
 
-# final output
-FINAL_K = 12
-MIN_KEEP = 5
-
-# verifier
-SNIPPET_CHARS = 1200
-REL_CUTOFF = 0.78       # keep docs with score >= top * REL_CUTOFF
-ABS_CUTOFF = 0.22       # or absolute minimum
-MIN_TOKEN_LEN = 5       # informative tokens
+# retrieval
+K_PER_ENTITY = 5             # top-k docs per entity
+SEARCH_TYPE = "simple"       # BM25
+ENTITY_FIELD = "entity_name" # change if your field name differs
 
 
-# ─────────────────────────────────────────────────────────────
-# Public API
-# ─────────────────────────────────────────────────────────────
+# ---------------------------
+# Vocabulary loading/cleaning
+# ---------------------------
 
-def extract_mentioned_docs_hybrid(
-    response_text: str,
-    final_k: int = FINAL_K,
-) -> List[Document]:
+def load_vocab(file_path: str) -> List[str]:
+    vocab: List[str] = []
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            word = line.strip().strip('"').strip("'")
+            if word:
+                vocab.append(word)
+    return vocab
+
+
+def clean_entity_names(vocab: List[str]) -> List[str]:
     """
-    1) Build an "anchor query" from the response (Q-line + bullets + key lines).
-    2) Retrieve candidates with BM25 + Semantic (2 calls).
-    3) Verify/rerank candidates using lexical overlap + fuzzy similarity.
-    4) Threshold with min-keep.
+    Input examples:
+      "L1 Capability Claim Management"
+      "L3 Capability Claim Communication Management"
+      "Application Something Something"
+    Output canonical names:
+      "Claim Management"
+      "Claim Communication Management"
+      "Something Something" (if non-L1/L2/L3 prefix, drops first token)
     """
-    anchor_query = build_anchor_query(response_text)
+    entities: Set[str] = set()
 
-    candidates = retrieve_candidates(anchor_query)
-    ranked = verify_and_rank(anchor_query, candidates)
-
-    kept = threshold_keep(ranked, final_k=final_k)
-    return kept
-
-
-# ─────────────────────────────────────────────────────────────
-# 1) Anchor query builder (prevents “query dilution”)
-# ─────────────────────────────────────────────────────────────
-
-Q_RE = re.compile(r"(?:^|\n)\s*Q:\s*(.+)", re.IGNORECASE)
-CIT_RE = re.compile(r"\[\d+\]")
-
-def build_anchor_query(response_text: str, max_anchors: int = 10, max_chars: int = 1200) -> str:
-    """
-    Pull high-signal lines from the response:
-      - Q: line (if present)
-      - bullet-ish lines
-      - lines containing citations [n]
-      - otherwise, first informative lines
-    This keeps retrieval focused even in mixed corpora.
-    """
-    lines = [ln.strip() for ln in response_text.splitlines() if ln.strip()]
-
-    anchors: List[str] = []
-
-    # Q line (best)
-    m = Q_RE.search(response_text)
-    if m:
-        anchors.append(m.group(1).strip())
-
-    # lines with citations (often “evidence” lines)
-    for ln in lines:
-        if CIT_RE.search(ln):
-            anchors.append(CIT_RE.sub("", ln).strip())
-
-    # bullet-ish lines
-    for ln in lines:
-        if ln.startswith(("-", "•", "*")):
-            anchors.append(CIT_RE.sub("", ln).strip())
-
-    # fallback: take early informative lines
-    if len(anchors) < max_anchors:
-        for ln in lines[:30]:
-            clean = CIT_RE.sub("", ln).strip()
-            if len(clean) >= 25:
-                anchors.append(clean)
-
-    # dedupe anchors
-    seen = set()
-    uniq: List[str] = []
-    for a in anchors:
-        an = normalize(a)
-        if not an or an in seen:
+    for entity in vocab:
+        e = entity.strip()
+        if not e:
             continue
-        seen.add(an)
-        uniq.append(a)
-        if len(uniq) >= max_anchors:
-            break
 
-    query = " ".join(uniq)
-    query = re.sub(r"\s+", " ", query).strip()
-    return query[:max_chars]
+        parts = e.split()
+        if len(parts) < 2:
+            continue
 
+        if e.startswith("L1") or e.startswith("L2") or e.startswith("L3"):
+            # e.g. L3 Capability Claim Communication Management -> drop first 2 tokens: L3 + Capability
+            name = " ".join(parts[2:]) if len(parts) > 2 else ""
+        else:
+            # drop first token (e.g., "Application Foo Bar" -> "Foo Bar")
+            name = " ".join(parts[1:])
 
-# ─────────────────────────────────────────────────────────────
-# 2) Two-call candidate retrieval (BM25 + semantic)
-# ─────────────────────────────────────────────────────────────
+        name = name.strip()
+        if name:
+            entities.add(name)
 
-def retrieve_candidates(anchor_query: str) -> List[Document]:
-    bm25 = IDPAzureSearchRetriever(
-        index_name=INDEX_NAME,
-        semantic_configuration_name=SEMANTIC_CONFIG,
-        search_type="simple",
-        k=K_BM25,
-    ).invoke(anchor_query)
-
-    sem = IDPAzureSearchRetriever(
-        index_name=INDEX_NAME,
-        semantic_configuration_name=SEMANTIC_CONFIG,
-        search_type="semantic",
-        k=K_VEC,
-    ).invoke(anchor_query)
-
-    return dedupe(list(bm25) + list(sem))
+    # stable order helps reproducibility
+    return sorted(entities)
 
 
-# ─────────────────────────────────────────────────────────────
-# 3) Verifier / reranker
-#    (drop “claims-related but wrong corpus” docs)
-# ─────────────────────────────────────────────────────────────
+# ---------------------------
+# Fuzzy matching
+# ---------------------------
 
-def verify_and_rank(anchor_query: str, candidates: List[Document]) -> List[Tuple[float, Document]]:
-    """
-    Score each candidate with evidence-based signals:
-      - overlap_score: fraction of informative query tokens present in doc snippet
-      - fuzzy_score: token_set_ratio(query, doc_snippet)
-    Combined score favors docs that *share concrete wording* with response anchors.
-    """
-    qn = normalize(anchor_query)
-    q_tokens = informative_tokens(qn)
-
-    ranked: List[Tuple[float, Document]] = []
-    for d in candidates:
-        snippet = (d.page_content or "")[:SNIPPET_CHARS]
-        dn = normalize(snippet)
-
-        # evidence overlap (0..1)
-        overlap = overlap_score(q_tokens, informative_tokens(dn))
-
-        # fuzzy (0..1)
-        fz = fuzz.token_set_ratio(qn, dn) / 100.0
-
-        # combine (tuned to reward “evidence overlap” more than semantic)
-        score = 0.65 * overlap + 0.35 * fz
-
-        d.metadata["anchor_overlap"] = overlap
-        d.metadata["anchor_fuzzy"] = fz
-        d.metadata["hybrid_verify_score"] = score
-        d.metadata["anchor_query"] = anchor_query[:250]
-
-        ranked.append((score, d))
-
-    ranked.sort(key=lambda x: x[0], reverse=True)
-    return ranked
-
-
-def informative_tokens(text_norm: str) -> set[str]:
-    toks = text_norm.split()
-    # keep “informative” tokens only (length-based, domain-agnostic)
-    return {t for t in toks if len(t) >= MIN_TOKEN_LEN}
-
-
-def overlap_score(q_tokens: set[str], d_tokens: set[str]) -> float:
-    if not q_tokens:
-        return 0.0
-    return len(q_tokens & d_tokens) / len(q_tokens)
-
-
-# ─────────────────────────────────────────────────────────────
-# 4) Thresholding (relative + absolute + min keep)
-# ─────────────────────────────────────────────────────────────
-
-def threshold_keep(ranked: List[Tuple[float, Document]], final_k: int) -> List[Document]:
-    if not ranked:
-        return []
-
-    top = ranked[0][0]
-    kept = [
-        d for s, d in ranked
-        if (s >= top * REL_CUTOFF) or (s >= ABS_CUTOFF)
-    ]
-
-    if len(kept) < min(MIN_KEEP, len(ranked)):
-        kept = [d for _, d in ranked[:min(MIN_KEEP, len(ranked))]]
-
-    return kept[:final_k]
-
-
-# ─────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────
-
-def normalize(s: str) -> str:
-    s = re.sub(r"\[\d+\]", "", s)          # remove [1] style
-    s = re.sub(r"[^\w\s]", " ", s)         # remove punctuation noise
+def _normalize(s: str) -> str:
+    s = re.sub(r"\[\d+\]", "", s)          # remove [1] markers
+    s = re.sub(r"[^\w\s]", " ", s)         # remove punctuation
     return re.sub(r"\s+", " ", s).strip().lower()
 
 
-def doc_key(doc: Document) -> str:
-    md = doc.metadata or {}
-    return str(
-        md.get("chunk_id")
-        or md.get("id")
-        or md.get("source")
-        or md.get("node_id")
-        or (doc.page_content or "")[:200]
-    )
+def match_entities_rapidfuzz(
+    response_text: str,
+    entities: List[str],
+    cutoff: int = VOCAB_FUZZ_CUTOFF,
+    max_terms: int = MAX_MATCHED_TERMS,
+) -> List[Tuple[str, int]]:
+    """
+    Returns [(entity_name, score)] sorted by score desc.
+    Uses:
+      - fast substring check first
+      - then partial_ratio as fuzzy fallback
+    """
+    resp_norm = _normalize(response_text)
 
+    hits: List[Tuple[str, int]] = []
 
-def dedupe(docs: List[Document]) -> List[Document]:
-    seen = set()
-    out: List[Document] = []
-    for d in docs:
-        k = doc_key(d)
-        if k in seen:
+    for ent in entities:
+        ent_norm = _normalize(ent)
+
+        # very short names cause tons of false positives
+        if len(ent_norm) < 4:
             continue
-        seen.add(k)
-        out.append(d)
+
+        if ent_norm in resp_norm:
+            score = 100
+        else:
+            # partial_ratio works well for "Claim Communication" inside longer sentences
+            score = int(fuzz.partial_ratio(ent_norm, resp_norm))
+
+        if score >= cutoff:
+            hits.append((ent, score))
+
+    hits.sort(key=lambda x: x[1], reverse=True)
+    return hits[:max_terms]
+
+
+# ---------------------------
+# Entity-filtered retrieval
+# ---------------------------
+
+def _escape_odata_string(value: str) -> str:
+    # OData string literals escape single quote by doubling it
+    return value.replace("'", "''")
+
+
+def fetch_docs_for_entities(
+    matched_entities: List[Tuple[str, int]],
+    k_per_entity: int = K_PER_ENTITY,
+) -> List[Document]:
+    """
+    For each matched entity, query Azure with filter:
+      entity_name eq '<entity>'
+    Returns deduped docs.
+    """
+    out: List[Document] = []
+    seen: set[str] = set()
+
+    for ent, score in matched_entities:
+        flt = f"{ENTITY_FIELD} eq '{_escape_odata_string(ent)}'"
+
+        retriever = IDPAzureSearchRetriever(
+            index_name=INDEX_NAME,
+            semantic_configuration_name=SEMANTIC_CONFIG,
+            search_type=SEARCH_TYPE,
+            k=k_per_entity,
+            # IMPORTANT: your retriever must accept this parameter. See notes below.
+            filter=flt,
+        )
+
+        docs = retriever.invoke(ent) or []
+        for d in docs:
+            d.metadata["matched_entity"] = ent
+            d.metadata["entity_match_score"] = score
+
+            key = (
+                str((d.metadata or {}).get("chunk_id"))
+                or str((d.metadata or {}).get("id"))
+                or str((d.metadata or {}).get("source"))
+                or (d.page_content or "")[:200]
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(d)
+
     return out
 
 
-# ─────────────────────────────────────────────────────────────
-# Optional runner (print results)
-# ─────────────────────────────────────────────────────────────
+# ---------------------------
+# One function you call
+# ---------------------------
+
+def extract_docs_by_vocab_entities(
+    response_text: str,
+    vocab_path: str,
+) -> List[Document]:
+    vocab = load_vocab(vocab_path)
+    entities = clean_entity_names(vocab)
+
+    matched = match_entities_rapidfuzz(response_text, entities)
+    return fetch_docs_for_entities(matched)
+
+
+# ---------------------------
+# Example run
+# ---------------------------
 
 if __name__ == "__main__":
-    response_text = """PASTE YOUR RESPONSE HERE"""
-    docs = extract_mentioned_docs_hybrid(response_text)
+    VOCAB_PATH = r"C:\Users\U588867\idp-impact-analysis\src\impact_analysis\utils\sightline_vocabulary 2.txt"
 
-    print("\nANCHOR QUERY:\n", build_anchor_query(response_text), "\n")
-    print("=== RESULTS ===")
-    for i, d in enumerate(docs, 1):
+    response_text = """PASTE YOUR RESPONSE TEXT HERE"""
+
+    matched_docs = extract_docs_by_vocab_entities(response_text, VOCAB_PATH)
+
+    print("\n=== MATCHED ENTITIES ===")
+    vocab = load_vocab(VOCAB_PATH)
+    entities = clean_entity_names(vocab)
+    for ent, score in match_entities_rapidfuzz(response_text, entities):
+        print(f"{score:>3}  {ent}")
+
+    print("\n=== DOCS ===")
+    for i, d in enumerate(matched_docs, 1):
         md = d.metadata or {}
-        print(f"\n[{i}] id={doc_key(d)}")
-        print(f"score={md.get('hybrid_verify_score'):.4f} overlap={md.get('anchor_overlap'):.4f} fuzzy={md.get('anchor_fuzzy'):.4f}")
+        print(f"\n[{i}] entity={md.get('matched_entity')} entity_score={md.get('entity_match_score')}")
+        print("keys:", [k for k in md.keys()][:12])
         print("snippet:", (d.page_content or "")[:220].replace("\n", " "))
