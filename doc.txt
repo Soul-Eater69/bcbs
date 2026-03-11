@@ -1,112 +1,32 @@
-Success Criteria (Vocabulary Entity Match + Filter Retrieval)
+row_id                               String   key
+value_stream_name                    String   searchable, filterable, sortable, facetable, retrievable
+value_stream_stage_id                String   filterable, retrievable
+value_stream_stage_sequence          Int32    filterable, sortable, retrievable
+value_stream_stage_name              String   searchable, filterable, sortable, facetable, retrievable
+value_stream_stage_description       String   searchable, retrievable
+value_stream_stage_display_name      String   searchable, retrievable
+value_stream_stage_entrance_criteria String   searchable, retrievable
+value_stream_stage_exit_criteria     String   searchable, retrievable
+value_stream_trigger                 String   searchable, filterable, facetable, retrievable
+value_stream_stakeholders            String   searchable, retrievable
+value_stream_stage_value_items       String   searchable, retrievable
+value_stream_category                String   searchable, filterable, sortable, facetable, retrievable
+value_stream_active                  Boolean  filterable, facetable, retrievable
+content                              String   searchable, retrievable
+content_vector                       Collection(Edm.Single)   searchable (vector), dimensions=1536, retrievable=false
 
-The system performs:
 
-• Extract entity names from a controlled vocabulary file
-• Match entities against the LLM response text using RapidFuzz
-• Select the top matched entities above the cutoff score
-• Build a single OData filter expression using matched entities
-• Call the search API once with the filter to retrieve relevant documents
 
-Edge Cases
-
-• If no entities match the response text → return empty result ([])
-• If entity length < 4 characters → ignored during matching
-• If entity score < cutoff (default 85) → not included
-• If more than max_terms matches occur → only top matches are kept
-• If search API returns documents with no content → stored as empty string
-• Apostrophes in entity names are escaped for OData filters
-
-Output Response Includes
-
-• matched_entities
-• matched_entity_scores
-• filter_expression used for search
-• retrieved_documents (List[Document])
-
-Each Document contains:
-
-• page_content
-• metadata
-• matched_entities (debug info)
-• matched_entity_scores (debug info)
-
-Benchmarks
-Case 1: Perfect Match
-
-response_text
-
-We updated the Claim Communication Management workflow and optimized Claims Intake processing.
-
-vocab_lines
-
-L3 Capability Claim Communication Management
-L2 Capability Claims Intake
-
-entities
-
-["Claim Communication Management", "Claims Intake"]
-
-Expected:
-
-matched_entities
-
-["Claim Communication Management", "Claims Intake"]
-
-filter_expression
-
-entity_name eq 'Claim Communication Management'
-or entity_name eq 'Claims Intake'
-
-Result
-
-• Search API called once
-• Documents returned only for those entities
-
-Case 2: Single Entity Match
-
-response_text
-
-The Claims Intake pipeline was updated to handle validation errors.
-
-entities
-
-["Claim Communication Management", "Claims Intake"]
-
-Expected:
-
-matched_entities
-
-["Claims Intake"]
-
-filter_expression
-
-entity_name eq 'Claims Intake'
-
-Result
-
-• Only documents for Claims Intake retrieved
-
-Case 3: No Match
-
-response_text
-
-We improved logging, monitoring, and CI/CD pipelines.
-
-entities
-
-["Claim Communication Management", "Claims Intake"]
-
-Expected:
-
-matched_entities
-
-[]
-
-Result
-
-• No filter built
-• No API call made
-• Function returns
-
-[]
+Value Stream: Acquire Asset.
+Stage ID: VSS00074680.
+Stage Sequence: 1.
+Stage Name: Request Asset.
+Stage Description: The act of submitting a request for a new asset.
+Display Name: Request Asset [VSS00074680].
+Entrance Criteria: Asset order initiated.
+Exit Criteria: Asset order acknowledged.
+Trigger: Asset Requester.
+Stakeholders: Supplier; Procurement; Asset Requestor; Business Manager; Finance Ops.
+Stage Value Items: Asset order requested.
+Category: Finance.
+Active: Yes.
