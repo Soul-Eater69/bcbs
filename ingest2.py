@@ -8,7 +8,7 @@ It does NOT read <base_dir>/_all_chunks.json.
 
 Behavior:
 - keeps original chunk hash id as Azure Search document key
-- stores derived uploader-safe key in uploadKey
+- does NOT add extra fields not present in the index schema
 - normalizes timezone offsets like -0500 -> -05:00
 - fills missing createdDate with updatedDate, else current UTC time
 - fills missing updatedDate with current UTC time
@@ -66,11 +66,6 @@ def _resolve_dates(created: Any, updated: Any) -> tuple[str, str]:
     return str(created_norm), str(updated_norm)
 
 
-def _build_safe_id(source_id: str, chunk_id: str, chunk_index: Any) -> str:
-    raw = f"{source_id}|{chunk_id}|{chunk_index}"
-    return re.sub(r"[^A-Za-z0-9_\-=]", "_", raw)
-
-
 def _load_ticket_chunk_files(base_dir: Path) -> list[Path]:
     pattern = str(base_dir / "*" / "07_chunks.json")
     return [Path(p) for p in sorted(glob.glob(pattern))]
@@ -103,19 +98,12 @@ def _load_documents(files: list[Path]) -> tuple[list[dict], dict[str, int]]:
                 provenance["slideRange"] = []
             item["chunkProvenance"] = provenance
 
-            source_id = str(item.get("sourceId") or "")
-            chunk_id = str(provenance.get("chunkId") or item.get("id") or "")
-            chunk_index = provenance.get("chunkIndex", 0)
-
+            # Keep original pipeline hash id as the Azure Search key
             original_id = str(item.get("id") or "").strip()
-            safe_id = _build_safe_id(source_id, chunk_id, chunk_index)
+            if not original_id:
+                raise ValueError(f"Missing id in chunk from {file_path}")
 
-            # Keep original pipeline id as the Azure key
-            item["id"] = original_id or safe_id
-
-            # Optional debug field to preserve the derived uploader-safe key
-            item["uploadKey"] = safe_id
-
+            item["id"] = original_id
             item["@search.action"] = "mergeOrUpload"
 
             docs.append(item)
