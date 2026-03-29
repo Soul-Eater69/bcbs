@@ -1,499 +1,466 @@
+from __future__ import annotations
+
 import asyncio
 import json
+import logging
 import os
-import re
-import hashlib
+import urllib3
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Requires the repo package to be importable, e.g.
-# pip install -e /path/to/jira_ingestion
-from jira_ingestion import JiraValueStreamClient
+# Silence noisy warnings
+warnings.filterwarnings("ignore", category=urllib3.exceptions.InsecureRequestWarning)
+warnings.filterwarnings(
+    "ignore",
+    message="Couldn't find ffmpeg or avconv.*",
+    category=RuntimeWarning,
+)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+from jira_ingestion import (  # noqa: E402
+    JiraIngestionConfig,
+    JiraValueStreamClient,
+    create_indexes,
+    ingest_ticket,
+)
+from src.clients.llm import IDPChatOpenAI  # noqa: E402
+from src.config import EMBEDDING_MODEL, JIRA_BASE_URL, JIRA_TOKEN  # noqa: E402
 
 
-# =========================
-# Config
-# =========================
-JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "https://your-jira-host")
-JIRA_BEARER_TOKEN = os.getenv("JIRA_BEARER_TOKEN", "")
-VERIFY_SSL = os.getenv("JIRA_VERIFY_SSL", "false").lower() == "true"
+# ---------------------------------------------------------------------------
+# Ticket list / runtime knobs
+# ---------------------------------------------------------------------------
 
-# Optional: map your Jira custom field IDs here.
-CUSTOM_FIELDS = {
-    "impacted_it_products": os.getenv("JIRA_CF_IMPACTED_IT_PRODUCTS", "customfield_10000"),
-    "impacted_products": os.getenv("JIRA_CF_IMPACTED_PRODUCTS", "customfield_10001"),
-    "requesting_organization": os.getenv("JIRA_CF_REQUESTING_ORG", "customfield_10002"),
-    "delivery_organization": os.getenv("JIRA_CF_DELIVERY_ORG", "customfield_10003"),
-}
+TICKETS: List[str] = list(
+    dict.fromkeys(
+        [
+            "IDMT-1320",
+            "IDMT-4125",
+            "IDMT-4124",
+            "IDMT-1403",
+            "IDMT-19761",
+            "IDMT-23229",
+        ]
+    )
+)
 
-DEFAULT_FIELDS = [
-    "summary",
-    "description",
-    "attachment",
-    "issuelinks",
-    "labels",
-    "components",
-    "priority",
-    "issuetype",
-    "status",
-    "resolution",
-    CUSTOM_FIELDS["impacted_it_products"],
-    CUSTOM_FIELDS["impacted_products"],
-    CUSTOM_FIELDS["requesting_organization"],
-    CUSTOM_FIELDS["delivery_organization"],
-]
+OUTPUT_DIR = Path(os.environ.get("TICKET_CHUNKS_DIR", "ticket_chunks"))
+VERIFY_SSL = os.environ.get("VERIFY_SSL", "false").lower() == "true"
+FORCE_REPROCESS = os.environ.get("FORCE_REPROCESS", "true").lower() == "true"
+MAX_CONCURRENT = int(os.environ.get("BATCH_MAX_CONCURRENT", "2"))
+ENABLE_LLM = os.environ.get("ENABLE_LLM", "true").lower() == "true"
 
 
-# =========================
-# Utility helpers
-# =========================
-def _safe_get(d: Dict[str, Any], path: List[str], default=None):
-    cur = d
-    for key in path:
-        if not isinstance(cur, dict):
-            return default
-        cur = cur.get(key)
-        if cur is None:
-            return default
-    return cur
+# ---------------------------------------------------------------------------
+# OpenAI-shaped adapter for IDPChatOpenAI
+# ---------------------------------------------------------------------------
+
+class _Message:
+    __slots__ = ("content",)
+
+    def __init__(self, content: str):
+        self.content = content
 
 
-def _to_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts = []
-        for item in value:
-            if isinstance(item, dict):
-                parts.append(item.get("value") or item.get("name") or str(item))
-            else:
-                parts.append(str(item))
-        return ", ".join([p for p in parts if p])
-    if isinstance(value, dict):
-        return value.get("value") or value.get("name") or json.dumps(value, ensure_ascii=False)
-    return str(value)
+class _Choice:
+    __slots__ = ("message",)
+
+    def __init__(self, message: _Message):
+        self.message = message
 
 
-def _sha(text: str) -> str:
-    return hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+class _ChatResponse:
+    __slots__ = ("choices",)
+
+    def __init__(self, choices: List[_Choice]):
+        self.choices = choices
 
 
-# =========================
-# Jira extraction
-# =========================
-def _extract_issue_links(issue: Dict[str, Any]) -> Dict[str, List[Dict[str, Optional[str]]]]:
-    links = _safe_get(issue, ["fields", "issuelinks"], []) or []
-    value_stream_links: List[Dict[str, Optional[str]]] = []
-    other_links: List[Dict[str, Optional[str]]] = []
+class _CompletionsAPI:
+    def __init__(self, llm: IDPChatOpenAI):
+        self._llm = llm
 
-    for link in links:
-        link_type = link.get("type", {}) or {}
-        outward_name = link_type.get("outward")
-        inward_name = link_type.get("inward")
-
-        if outward_name == "implements" and "outwardIssue" in link:
-            linked = link["outwardIssue"]
-            value_stream_links.append(
-                {
-                    "direction": "outward",
-                    "relationship": outward_name,
-                    "key": linked.get("key"),
-                    "summary": _safe_get(linked, ["fields", "summary"]),
-                    "status": _safe_get(linked, ["fields", "status", "name"]),
-                }
-            )
-        elif inward_name == "implemented by" and "inwardIssue" in link:
-            linked = link["inwardIssue"]
-            value_stream_links.append(
-                {
-                    "direction": "inward",
-                    "relationship": inward_name,
-                    "key": linked.get("key"),
-                    "summary": _safe_get(linked, ["fields", "summary"]),
-                    "status": _safe_get(linked, ["fields", "status", "name"]),
-                }
-            )
-        else:
-            linked_issue = link.get("outwardIssue") or link.get("inwardIssue") or {}
-            relationship = outward_name if "outwardIssue" in link else inward_name
-            other_links.append(
-                {
-                    "relationship": relationship,
-                    "key": linked_issue.get("key"),
-                    "summary": _safe_get(linked_issue, ["fields", "summary"]),
-                    "status": _safe_get(linked_issue, ["fields", "status", "name"]),
-                }
-            )
-
-    return {"value_stream_links": value_stream_links, "other_links": other_links}
+    def create(
+        self,
+        *,
+        model: str,
+        messages: List[dict],
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        **kwargs: Any,
+    ) -> _ChatResponse:
+        self._llm.model_name = model
+        if temperature is not None:
+            self._llm.temperature = temperature
+        invoke_kwargs: Dict[str, Any] = {}
+        if max_tokens is not None:
+            invoke_kwargs["max_completion_tokens"] = max_tokens
+        result = self._llm.invoke(messages, **invoke_kwargs)
+        return _ChatResponse(choices=[_Choice(_Message(result.content))])
 
 
-def _select_primary_attachment(attachments: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    if not attachments:
-        return None
+class _ChatAPI:
+    __slots__ = ("completions",)
 
-    preferred_exts = (".pptx", ".ppt", ".pdf", ".docx", ".doc", ".xlsx", ".xls")
-
-    def score(att: Dict[str, Any]):
-        filename = (att.get("filename") or "").lower()
-        size = att.get("size") or 0
-        preferred = 1 if filename.endswith(preferred_exts) else 0
-        return (preferred, size)
-
-    return sorted(attachments, key=score, reverse=True)[0]
+    def __init__(self, completions: _CompletionsAPI):
+        self.completions = completions
 
 
-# =========================
-# Preprocessing
-# =========================
-def _clean_text(text: str) -> str:
-    text = text or ""
-    text = re.sub(r"<!--\s*Slide number:\s*\d+\s*-->", " ", text, flags=re.IGNORECASE)
-    text = re.sub(r"!\[\]\([^)]+\)", " ", text)
-    text = re.sub(r"PROPRIETARY AND CONFIDENTIAL\s*-\s*FOR INTERNAL USE ONLY", " ", text, flags=re.IGNORECASE)
-    text = text.replace("|", " ")
-
-    drop_prefixes = [
-        "Current as of:",
-        "Funding Portfolio:",
-        "Project Category:",
-        "Project Sub-Category:",
-        "Intake BSL:",
-        "Business Architect:",
-        "EPMO Lead:",
-        "Idea Card Author:",
-        "Executive Sponsor:",
-        "Accountable:",
-        "Responsible:",
-        "Functional Portfolio Owner:",
-        "### Notes:",
-        "# Appendix",
-    ]
-
-    kept_lines: List[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if any(stripped.startswith(prefix) for prefix in drop_prefixes):
-            continue
-        kept_lines.append(stripped)
-
-    text = "\n".join(kept_lines)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+class OpenAICompatibleLLM:
+    def __init__(self, model: str = "gpt-4o-mini"):
+        self.chat = _ChatAPI(_CompletionsAPI(IDPChatOpenAI(model=model)))
 
 
-def _extract_signal_sections(raw_text: str) -> Dict[str, str]:
-    cleaned = (raw_text or "").replace("\r", "")
-    section_names = [
-        "Idea Card Executive Summary:",
-        "Problem Statement/Market Opportunity:",
-        "Business Solution and Objectives:",
-        "Alternative Solutions:",
-        "Value Proposition & Key Metrics:",
-        "Interdependencies:",
-        "Estimated Costs:",
-        "Resources/Investments Needed for Business Case:",
-    ]
-    positions: List[Tuple[int, str]] = []
-    for name in section_names:
-        idx = cleaned.find(name)
-        if idx != -1:
-            positions.append((idx, name))
-    positions.sort()
-
-    sections: Dict[str, str] = {}
-    for i, (start, name) in enumerate(positions):
-        end = positions[i + 1][0] if i + 1 < len(positions) else len(cleaned)
-        sections[name] = cleaned[start:end].strip()
-    return sections
+# ---------------------------------------------------------------------------
+# JSON helpers
+# ---------------------------------------------------------------------------
 
 
-def _normalize_for_search(text: str, max_chars: int = 2500) -> str:
-    text = re.sub(r"\s+", " ", (text or "")).strip()
-    return text[:max_chars]
+def dump_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
 
 
-def _build_retrieval_views(summary: str, description: str, primary_attachment_text: str) -> List[Dict[str, Any]]:
-    raw = "\n\n".join([summary or "", description or "", primary_attachment_text or ""]).strip()
-    cleaned = _clean_text(raw)
-    sections = _extract_signal_sections(primary_attachment_text or raw)
-
-    executive = sections.get("Idea Card Executive Summary:", "")
-    problem = sections.get("Problem Statement/Market Opportunity:", "")
-    solution = sections.get("Business Solution and Objectives:", "")
-    alternative = sections.get("Alternative Solutions:", "")
-    value_prop = sections.get("Value Proposition & Key Metrics:", "")
-    interdep = sections.get("Interdependencies:", "")
-    costs = sections.get("Estimated Costs:", "")
-
-    views = [
-        {
-            "view_name": "cleaned_full",
-            "text": _normalize_for_search(cleaned, 2500),
-            "why": "whole-ticket cleaned retrieval text",
-        },
-        {
-            "view_name": "problem_objective",
-            "text": _normalize_for_search(" ".join([executive, problem, solution]), 2400),
-            "why": "business problem and objectives focused view",
-        },
-        {
-            "view_name": "solution_capabilities",
-            "text": _normalize_for_search(" ".join([solution, alternative]), 2400),
-            "why": "capabilities and proposed solution focused view",
-        },
-        {
-            "view_name": "value_metrics",
-            "text": _normalize_for_search(" ".join([value_prop, interdep, costs]), 1800),
-            "why": "value proposition, interdependencies, and costs focused view",
-        },
-    ]
-
-    deduped: List[Dict[str, Any]] = []
-    seen = set()
-    for v in views:
-        key = v["text"].strip().lower()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        deduped.append(v)
-    return deduped
+# ---------------------------------------------------------------------------
+# Azure-ready record builders
+# ---------------------------------------------------------------------------
 
 
-# =========================
-# Chunking
-# =========================
-def _chunk_text(text: str, source_name: str, chunk_type: str, max_chars: int = 1200) -> List[Dict[str, Any]]:
-    text = (text or "").strip()
-    if not text:
+def _attachment_references(chunk: dict) -> List[dict]:
+    attachment_id = str(chunk.get("attachment_id") or "")
+    attachment_name = str(chunk.get("attachment_name") or "")
+    if not attachment_id and not attachment_name:
         return []
 
-    # First try sentence-ish / bullet-ish segmentation
-    parts = re.split(r"(?:(?<=\.)\s+|\n+|\s+-\s+|\s+•\s+)", text)
-    parts = [p.strip() for p in parts if p and p.strip()]
+    source_type = str(chunk.get("source") or "")
+    if source_type.startswith("supplementary_"):
+        category = "supplementary"
+    elif source_type in {"pdf_page", "pptx_slide", "docx_section", "section"}:
+        category = "primary"
+    else:
+        category = "ticket"
 
-    chunks: List[str] = []
-    cur = ""
-    for part in parts:
-        if len(cur) + len(part) + 1 <= max_chars:
-            cur = f"{cur} {part}".strip()
-        else:
-            if cur:
-                chunks.append(cur)
-            cur = part[:max_chars]
-    if cur:
-        chunks.append(cur)
-
-    output = []
-    for i, chunk in enumerate(chunks, start=1):
-        output.append(
-            {
-                "chunk_id": f"{source_name}:{chunk_type}:{i}:{_sha(chunk)}",
-                "source_name": source_name,
-                "chunk_type": chunk_type,
-                "chunk_text": chunk,
-                "chunk_summary": chunk[:300],
-                "salience_score": min(1.0, max(0.2, len(chunk) / max_chars)),
-                "extraction_confidence": 1.0,
-            }
-        )
-    return output
+    return [
+        {
+            "attachmentId": attachment_id,
+            "attachmentName": attachment_name,
+            "attachmentType": str(chunk.get("attachment_type") or ""),
+            "category": category,
+        }
+    ]
 
 
-# =========================
-# Document assembly
-# =========================
-def _build_ticket_doc(issue: Dict[str, Any], attachment_texts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    fields = issue.get("fields", {}) or {}
-    links = _extract_issue_links(issue)
-    attachments = fields.get("attachment", []) or []
-    primary_attachment = _select_primary_attachment(attachments)
-    primary_attachment_name = primary_attachment.get("filename") if primary_attachment else None
 
-    primary_attachment_text = ""
-    if primary_attachment_name:
-        for item in attachment_texts:
-            if item.get("filename") == primary_attachment_name:
-                primary_attachment_text = item.get("text_content") or ""
-                break
-
-    summary = fields.get("summary") or ""
-    description = fields.get("description") or ""
-
-    retrieval_views = _build_retrieval_views(summary, description, primary_attachment_text)
-
-    ticket_doc = {
-        "jira_key": issue.get("key"),
-        "summary": summary,
-        "description_raw": description,
-        "description_cleaned": _clean_text(description),
-        "issue_type": _safe_get(fields, ["issuetype", "name"]),
-        "status": _safe_get(fields, ["status", "name"]),
-        "resolution": _safe_get(fields, ["resolution", "name"]),
-        "priority": _safe_get(fields, ["priority", "name"]),
-        "labels": fields.get("labels", []) or [],
-        "components": [c.get("name") for c in fields.get("components", []) if c.get("name")],
-        "requesting_organization_raw": fields.get(CUSTOM_FIELDS["requesting_organization"]),
-        "delivery_organization_raw": fields.get(CUSTOM_FIELDS["delivery_organization"]),
-        "impacted_products_raw": fields.get(CUSTOM_FIELDS["impacted_products"]),
-        "impacted_it_products_raw": fields.get(CUSTOM_FIELDS["impacted_it_products"]),
-        "requesting_organization_text": _to_text(fields.get(CUSTOM_FIELDS["requesting_organization"])),
-        "delivery_organization_text": _to_text(fields.get(CUSTOM_FIELDS["delivery_organization"])),
-        "impacted_products_text": _to_text(fields.get(CUSTOM_FIELDS["impacted_products"])),
-        "impacted_it_products_text": _to_text(fields.get(CUSTOM_FIELDS["impacted_it_products"])),
-        "value_stream_links": links["value_stream_links"],
-        "other_issue_links": links["other_links"],
-        "attachments": [
-            {
-                "id": a.get("id"),
-                "filename": a.get("filename"),
-                "mimeType": a.get("mimeType"),
-                "size": a.get("size"),
-                "content_url": a.get("content"),
-            }
-            for a in attachments
-        ],
-        "attachment_texts": attachment_texts,
-        "primary_attachment": (
-            {
-                "id": primary_attachment.get("id"),
-                "filename": primary_attachment.get("filename"),
-                "mimeType": primary_attachment.get("mimeType"),
-                "size": primary_attachment.get("size"),
-            }
-            if primary_attachment
-            else None
-        ),
-        "primary_attachment_text_cleaned": _clean_text(primary_attachment_text),
-        "retrieval_views": retrieval_views,
-        "quality_tier": "A" if attachments and description else "B" if attachments or description else "D",
-    }
-    return ticket_doc
+def _content_type(chunk: dict) -> str:
+    source = str(chunk.get("source") or "")
+    if source == "section":
+        return "section"
+    if source == "docx_section":
+        return "section"
+    if source in {"pdf_page", "pptx_slide"}:
+        return "page"
+    if source.startswith("supplementary_"):
+        return "supplementary"
+    if source == "description":
+        return "description"
+    if source == "comment":
+        return "comment"
+    return source or "unknown"
 
 
-def _build_chunk_docs(ticket_doc: Dict[str, Any]) -> List[Dict[str, Any]]:
-    jira_key = ticket_doc["jira_key"]
-    chunks: List[Dict[str, Any]] = []
 
-    chunks.extend(_chunk_text(ticket_doc.get("description_cleaned", ""), jira_key, "description", 1200))
-    chunks.extend(_chunk_text(ticket_doc.get("primary_attachment_text_cleaned", ""), jira_key, "primary_attachment", 1400))
-
-    for rv in ticket_doc.get("retrieval_views", []):
-        view_chunks = _chunk_text(rv.get("text", ""), jira_key, f"retrieval_view:{rv.get('view_name')}", 1200)
-        for c in view_chunks:
-            c["view_name"] = rv.get("view_name")
-            c["view_why"] = rv.get("why")
-        chunks.extend(view_chunks)
-
-    return chunks
+def _resolve_page_range(chunk: dict) -> Optional[List[int]]:
+    if chunk.get("page_range"):
+        return chunk["page_range"]
+    if chunk.get("source") == "pdf_page" and chunk.get("page_num") is not None:
+        p = chunk["page_num"]
+        return [p, p]
+    return None
 
 
-def _build_supervision_doc(ticket_doc: Dict[str, Any]) -> Dict[str, Any]:
+
+def _resolve_slide_range(chunk: dict) -> Optional[List[int]]:
+    if chunk.get("slide_range"):
+        return chunk["slide_range"]
+    if chunk.get("source") == "pptx_slide" and chunk.get("slide_num") is not None:
+        s = chunk["slide_num"]
+        return [s, s]
+    return None
+
+
+
+def build_chunk_record(chunk: dict, ticket_id: str, obs: dict, meta: dict) -> dict:
+    source_url = f"{JIRA_BASE_URL.rstrip('/')}/browse/{ticket_id}" if JIRA_BASE_URL else ticket_id
+    content = str(chunk.get("text") or "")
+
     return {
-        "jira_key": ticket_doc["jira_key"],
-        "linked_value_stream_ids": [x.get("key") for x in ticket_doc.get("value_stream_links", []) if x.get("key")],
-        "linked_value_stream_names": [x.get("summary") for x in ticket_doc.get("value_stream_links", []) if x.get("summary")],
-        "linked_value_stream_count": len(ticket_doc.get("value_stream_links", [])),
-        "impacted_products_raw": ticket_doc.get("impacted_products_raw"),
-        "impacted_it_products_raw": ticket_doc.get("impacted_it_products_raw"),
-        "impacted_products_text": ticket_doc.get("impacted_products_text"),
-        "impacted_it_products_text": ticket_doc.get("impacted_it_products_text"),
-        "label_source": "jira_issue_links_and_ticket_fields",
-    }
-
-
-def _build_debug_report(ticket_doc: Dict[str, Any], chunk_docs: List[Dict[str, Any]], supervision_doc: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "jira_key": ticket_doc["jira_key"],
-        "summary": ticket_doc.get("summary"),
-        "quality_tier": ticket_doc.get("quality_tier"),
-        "primary_attachment": ticket_doc.get("primary_attachment"),
-        "preprocessing_preview": {
-            "description_cleaned_preview": ticket_doc.get("description_cleaned", "")[:1200],
-            "primary_attachment_cleaned_preview": ticket_doc.get("primary_attachment_text_cleaned", "")[:2000],
+        "id": str(chunk.get("chunk_uid") or chunk.get("chunk_id") or ""),
+        "content": content,
+        "content_vector": chunk.get("embedding") or None,
+        "dataSource": "jira",
+        "sourceId": ticket_id,
+        "sourceURL": source_url,
+        "title": str(meta.get("title") or meta.get("summary") or ticket_id),
+        "contentType": _content_type(chunk),
+        "headerHierarchy": str(chunk.get("header_hierarchy") or chunk.get("section_title") or ""),
+        "tokenCount": int(chunk.get("token_count") or chunk.get("word_count") or len(content.split())),
+        "project": ticket_id.split("-")[0] if "-" in ticket_id else "",
+        "issueType": str(meta.get("issue_type") or ""),
+        "status": str(meta.get("status") or ""),
+        "priority": str(meta.get("priority") or ""),
+        "reporter": str(meta.get("reporter") or ""),
+        "createdDate": str(obs.get("created") or ""),
+        "updatedDate": str(obs.get("updated_at") or ""),
+        "contextKeywords": chunk.get("context_keywords") or [],
+        "attachmentReferences": _attachment_references(chunk),
+        "chunkProvenance": {
+            "chunkId": str(chunk.get("chunk_id") or ""),
+            "chunkIndex": int(chunk.get("chunk_index") or 0),
+            "sourceType": str(chunk.get("source") or ""),
+            "attachmentId": str(chunk.get("attachment_id") or ""),
+            "attachmentName": str(chunk.get("attachment_name") or ""),
+            "attachmentType": str(chunk.get("attachment_type") or ""),
+            "pageRange": _resolve_page_range(chunk),
+            "slideRange": _resolve_slide_range(chunk),
+            "extractionMethod": str(chunk.get("extraction_method") or ""),
+            "extractionConfidence": chunk.get("extraction_confidence"),
         },
-        "retrieval_views": ticket_doc.get("retrieval_views", []),
-        "chunk_count": len(chunk_docs),
-        "chunk_previews": chunk_docs[:8],
-        "value_stream_labels": supervision_doc.get("linked_value_stream_names", []),
-        "value_stream_ids": supervision_doc.get("linked_value_stream_ids", []),
-        "impacted_products_text": supervision_doc.get("impacted_products_text"),
-        "impacted_it_products_text": supervision_doc.get("impacted_it_products_text"),
     }
 
 
-# =========================
-# Main fetch / write
-# =========================
-async def fetch_issue_with_repo_client(ticket_key: str) -> Dict[str, Any]:
+
+def build_valuestream_record(ticket_id: str, result: dict) -> dict:
+    sup = result.get("supervision", {})
+    obs = result.get("observed", {})
+    meta = obs.get("metadata", {})
+
+    impacted_products = sup.get("impacted_products", {}) if isinstance(sup.get("impacted_products"), dict) else {}
+    impacted_it_products = (
+        sup.get("impacted_it_products", {}) if isinstance(sup.get("impacted_it_products"), dict) else {}
+    )
+
+    return {
+        "id": ticket_id,
+        "ticketId": ticket_id,
+        "project": ticket_id.split("-")[0] if "-" in ticket_id else "",
+        "title": str(meta.get("title") or meta.get("summary") or ticket_id),
+        "valueStreamIds": sup.get("linked_value_stream_ids", []) or [],
+        "valueStreamNames": sup.get("linked_value_stream_names", []) or [],
+        "valueStreamStatuses": sup.get("linked_value_stream_statuses", []) or [],
+        "impactedProductIds": impacted_products.get("ids", []) or [],
+        "impactedProductNames": impacted_products.get("names", []) or [],
+        "impactedItProductIds": impacted_it_products.get("ids", []) or [],
+        "impactedItProductNames": impacted_it_products.get("names", []) or [],
+        "labelSource": str(sup.get("vs_label_source") or ""),
+        "updatedDate": str(obs.get("updated_at") or ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Runtime helpers
+# ---------------------------------------------------------------------------
+
+
+def _create_memory_indexes() -> Tuple[Any, Any, Any, Any]:
+    try:
+        return create_indexes(
+            backend="memory",
+            metadata_store_path=None,
+            supervision_store_path=None,
+        )
+    except TypeError:
+        return create_indexes(backend="memory")
+
+
+
+def _try_build_llm(model: str = "gpt-4o-mini") -> OpenAICompatibleLLM | None:
+    if not ENABLE_LLM:
+        logger.info("LLM disabled by ENABLE_LLM=false")
+        return None
+    try:
+        return OpenAICompatibleLLM(model=model)
+    except Exception as exc:
+        logger.warning("LLM unavailable (%s) - continuing without LLM", exc)
+        return None
+
+
+
+def build_config() -> JiraIngestionConfig:
+    return JiraIngestionConfig(
+        llm_model="gpt-5-mini-idp",
+        embedding_model=EMBEDDING_MODEL,
+        section_only_chunks=True,
+        enable_raw_artifact_persistence=False,
+        enable_attachment_text_persistence=False,
+        enable_debug_stage_persistence=False,
+        enable_prechunk_persistence=False,
+        enable_attachment_inventory=True,
+        enable_retrieval_views=True,
+        skip_llm_summary=True,
+        skip_llm_keywords=False,
+        skip_llm_derived=True,
+    )
+
+
+async def process_ticket(
+    ticket_id: str,
+    client: JiraValueStreamClient,
+    coarse_index: Any,
+    fine_index: Any,
+    metadata_index: Any,
+    supervision_store: Any,
+    cfg: JiraIngestionConfig,
+    llm_client: Any,
+) -> Tuple[List[dict], dict]:
+    """Run ingestion and write only verification JSON under ticket_chunks/<ticket_id>/."""
+    ticket_dir = OUTPUT_DIR / ticket_id
+    ticket_dir.mkdir(parents=True, exist_ok=True)
+
+    chunks_file = ticket_dir / "07_chunks.json"
+    vs_file = ticket_dir / "08_valuestream_map.json"
+
+    if not FORCE_REPROCESS and chunks_file.exists() and vs_file.exists():
+        logger.info("Skipping %s (already completed)", ticket_id)
+        chunks = json.loads(chunks_file.read_text(encoding="utf-8")).get("chunks", [])
+        vs_map = json.loads(vs_file.read_text(encoding="utf-8"))
+        return chunks, vs_map
+
+    logger.info("Processing %s ...", ticket_id)
+
+    result = await ingest_ticket(
+        ticket_key=ticket_id,
+        jira_client=client,
+        coarse_index=coarse_index,
+        fine_index=fine_index,
+        metadata_index=metadata_index,
+        supervision_store=supervision_store,
+        config=cfg,
+        llm_client=llm_client,
+        embedding_client=None,  # verify-only run: no local vectors / no embedding cost
+        storage_dir=None,        # do not write pipeline debug artifacts locally
+    )
+
+    obs = result.get("observed", {})
+    meta = obs.get("metadata", {})
+
+    chunk_records = [
+        build_chunk_record(c, ticket_id, obs, meta)
+        for c in obs.get("chunks", [])
+    ]
+
+    dump_json(
+        chunks_file,
+        {
+            "ticket_id": ticket_id,
+            "mapped_value_stream_ids": result.get("supervision", {}).get("linked_value_stream_ids", []) or [],
+            "mapped_value_stream_names": result.get("supervision", {}).get("linked_value_stream_names", []) or [],
+            "chunk_count": len(chunk_records),
+            "chunks": chunk_records,
+        },
+    )
+
+    vs_record = build_valuestream_record(ticket_id, result)
+    dump_json(vs_file, vs_record)
+
+    logger.info(
+        "%s chunks=%d vs_links=%d products=%d",
+        ticket_id,
+        len(chunk_records),
+        len(vs_record["valueStreamIds"]),
+        len(vs_record["impactedProductIds"]),
+    )
+    return chunk_records, vs_record
+
+
+async def main() -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    cfg = build_config()
+    coarse, fine, metadata_index, supervision_store = _create_memory_indexes()
+    llm_client = _try_build_llm()
+
+    all_chunks: List[dict] = []
+    all_vs_maps: List[dict] = []
+    errors: List[dict] = []
+
+    sem = asyncio.Semaphore(MAX_CONCURRENT)
+
+    async def _guarded(ticket_id: str, client: JiraValueStreamClient) -> Tuple[str, Optional[List[dict]], Optional[dict], Optional[str]]:
+        async with sem:
+            try:
+                chunks, vs_map = await process_ticket(
+                    ticket_id,
+                    client,
+                    coarse,
+                    fine,
+                    metadata_index,
+                    supervision_store,
+                    cfg,
+                    llm_client,
+                )
+                return ticket_id, chunks, vs_map, None
+            except Exception as exc:
+                logger.exception("Ticket %s failed", ticket_id)
+                return ticket_id, None, None, str(exc)
+
     async with JiraValueStreamClient(
         base_url=JIRA_BASE_URL,
-        token=JIRA_BEARER_TOKEN,
+        token=JIRA_TOKEN,
         verify_ssl=VERIFY_SSL,
     ) as client:
-        issue = await client.client.get_issue_by_key(ticket_key, fields=DEFAULT_FIELDS)
-        attachments = _safe_get(issue, ["fields", "attachment"], []) or []
-        attachment_texts = await client.fetch_attachment_content(attachments)
-        return {"issue": issue, "attachment_texts": attachment_texts}
+        results = await asyncio.gather(*[_guarded(tid, client) for tid in TICKETS])
 
+    for ticket_id, chunks, vs_map, err in results:
+        if err:
+            errors.append({"ticket_id": ticket_id, "error": err})
+            dump_json(OUTPUT_DIR / f"{ticket_id}__ERROR.json", {"ticket_id": ticket_id, "error": err})
+        else:
+            all_chunks.extend(chunks or [])
+            if vs_map is not None:
+                all_vs_maps.append(vs_map)
 
-async def run(ticket_key: str, output_dir: str) -> None:
-    if not JIRA_BEARER_TOKEN:
-        raise RuntimeError("Set JIRA_BEARER_TOKEN in your environment before running.")
+    dump_json(
+        OUTPUT_DIR / "_all_chunks.json",
+        {
+            "total_chunks": len(all_chunks),
+            "tickets_processed": len(all_vs_maps),
+            "tickets_failed": len(errors),
+            "chunks": all_chunks,
+        },
+    )
 
-    output = Path(output_dir)
-    output.mkdir(parents=True, exist_ok=True)
+    dump_json(
+        OUTPUT_DIR / "_all_valuestream_maps.json",
+        {
+            "total_tickets": len(all_vs_maps),
+            "tickets_with_vs_links": sum(1 for m in all_vs_maps if m["valueStreamIds"]),
+            "tickets_with_products": sum(1 for m in all_vs_maps if m["impactedProductIds"]),
+            "maps": all_vs_maps,
+        },
+    )
 
-    data = await fetch_issue_with_repo_client(ticket_key)
-    issue = data["issue"]
-    attachment_texts = data["attachment_texts"]
+    if errors:
+        dump_json(OUTPUT_DIR / "_errors.json", errors)
 
-    ticket_doc = _build_ticket_doc(issue, attachment_texts)
-    chunk_docs = _build_chunk_docs(ticket_doc)
-    supervision_doc = _build_supervision_doc(ticket_doc)
-    debug_report = _build_debug_report(ticket_doc, chunk_docs, supervision_doc)
-
-    raw_issue_path = output / f"{ticket_key}_raw_issue.json"
-    ticket_doc_path = output / f"{ticket_key}_ticket_doc.json"
-    chunks_path = output / f"{ticket_key}_chunk_docs.json"
-    supervision_path = output / f"{ticket_key}_supervision_doc.json"
-    debug_path = output / f"{ticket_key}_debug_report.json"
-
-    raw_issue_path.write_text(json.dumps(issue, indent=2, ensure_ascii=False), encoding="utf-8")
-    ticket_doc_path.write_text(json.dumps(ticket_doc, indent=2, ensure_ascii=False), encoding="utf-8")
-    chunks_path.write_text(json.dumps(chunk_docs, indent=2, ensure_ascii=False), encoding="utf-8")
-    supervision_path.write_text(json.dumps(supervision_doc, indent=2, ensure_ascii=False), encoding="utf-8")
-    debug_path.write_text(json.dumps(debug_report, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    print("\n=== DONE ===")
-    print(f"Raw issue          : {raw_issue_path}")
-    print(f"Ticket retrieval   : {ticket_doc_path}")
-    print(f"Chunk docs         : {chunks_path}")
-    print(f"Supervision doc    : {supervision_path}")
-    print(f"Debug report       : {debug_path}")
-
-    print("\n=== QUICK PREVIEW ===")
-    print(f"Key                : {ticket_doc['jira_key']}")
-    print(f"Summary            : {ticket_doc.get('summary')}")
-    print(f"Quality tier       : {ticket_doc.get('quality_tier')}")
-    print(f"Primary attachment : {ticket_doc.get('primary_attachment')}")
-    print(f"VS labels          : {supervision_doc.get('linked_value_stream_names')}")
-    print(f"Impacted products  : {supervision_doc.get('impacted_products_text')}")
-    print(f"Impacted IT prods  : {supervision_doc.get('impacted_it_products_text')}")
-    print(f"Retrieval views    : {[x['view_name'] for x in ticket_doc.get('retrieval_views', [])]}")
-    print(f"Chunk count        : {len(chunk_docs)}")
+    print("\n" + "=" * 80)
+    print(f"BATCH COMPLETE - {len(all_vs_maps)} succeeded, {len(errors)} failed")
+    print(f"Chunk index records: {OUTPUT_DIR / '_all_chunks.json'}")
+    print(f"VS map records:      {OUTPUT_DIR / '_all_valuestream_maps.json'}")
+    for m in all_vs_maps:
+        print(f"  {m['ticketId']}: {OUTPUT_DIR / m['ticketId'] / '07_chunks.json'}, {OUTPUT_DIR / m['ticketId'] / '08_valuestream_map.json'}")
+    if errors:
+        print("Errors:")
+        for e in errors:
+            print(f"  {e['ticket_id']}: {e['error'][:160]}")
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Sample Jira ingestion using jira_ingestion repo client")
-    parser.add_argument("ticket_key", help="Jira key like IDMT-1320")
-    parser.add_argument("--output-dir", default="./jira_ingest_output", help="Directory to write JSON artifacts")
-    args = parser.parse_args()
-
-    asyncio.run(run(args.ticket_key, args.output_dir))
+    asyncio.run(main())
