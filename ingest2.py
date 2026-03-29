@@ -6,11 +6,12 @@ Reads only individual files:
 
 It does NOT read <base_dir>/_all_chunks.json.
 
-Fixes:
+Behavior:
+- keeps original chunk hash id as Azure Search document key
+- stores derived uploader-safe key in uploadKey
 - normalizes timezone offsets like -0500 -> -05:00
 - fills missing createdDate with updatedDate, else current UTC time
 - fills missing updatedDate with current UTC time
-- preserves nested chunkProvenance ranges
 """
 
 from __future__ import annotations
@@ -88,7 +89,6 @@ def _load_documents(files: list[Path]) -> tuple[list[dict], dict[str, int]]:
         for doc in chunks:
             item = dict(doc)
 
-            # Fill/normalize top-level date fields for Azure Edm.DateTimeOffset
             created_date, updated_date = _resolve_dates(
                 item.get("createdDate"),
                 item.get("updatedDate"),
@@ -107,7 +107,15 @@ def _load_documents(files: list[Path]) -> tuple[list[dict], dict[str, int]]:
             chunk_id = str(provenance.get("chunkId") or item.get("id") or "")
             chunk_index = provenance.get("chunkIndex", 0)
 
-            item["id"] = _build_safe_id(source_id, chunk_id, chunk_index)
+            original_id = str(item.get("id") or "").strip()
+            safe_id = _build_safe_id(source_id, chunk_id, chunk_index)
+
+            # Keep original pipeline id as the Azure key
+            item["id"] = original_id or safe_id
+
+            # Optional debug field to preserve the derived uploader-safe key
+            item["uploadKey"] = safe_id
+
             item["@search.action"] = "mergeOrUpload"
 
             docs.append(item)
