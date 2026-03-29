@@ -122,7 +122,6 @@ class OpenAICompatibleLLM:
 # JSON helpers
 # ---------------------------------------------------------------------------
 
-
 def dump_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
@@ -132,7 +131,6 @@ def dump_json(path: Path, data: Any) -> None:
 # ---------------------------------------------------------------------------
 # Azure-ready record builders
 # ---------------------------------------------------------------------------
-
 
 def _attachment_references(chunk: dict) -> List[dict]:
     attachment_id = str(chunk.get("attachment_id") or "")
@@ -158,7 +156,6 @@ def _attachment_references(chunk: dict) -> List[dict]:
     ]
 
 
-
 def _content_type(chunk: dict) -> str:
     source = str(chunk.get("source") or "")
     if source == "section":
@@ -176,7 +173,6 @@ def _content_type(chunk: dict) -> str:
     return source or "unknown"
 
 
-
 def _resolve_page_range(chunk: dict) -> Optional[List[int]]:
     if chunk.get("page_range"):
         return chunk["page_range"]
@@ -186,7 +182,6 @@ def _resolve_page_range(chunk: dict) -> Optional[List[int]]:
     return None
 
 
-
 def _resolve_slide_range(chunk: dict) -> Optional[List[int]]:
     if chunk.get("slide_range"):
         return chunk["slide_range"]
@@ -194,7 +189,6 @@ def _resolve_slide_range(chunk: dict) -> Optional[List[int]]:
         s = chunk["slide_num"]
         return [s, s]
     return None
-
 
 
 def build_chunk_record(chunk: dict, ticket_id: str, obs: dict, meta: dict) -> dict:
@@ -236,7 +230,6 @@ def build_chunk_record(chunk: dict, ticket_id: str, obs: dict, meta: dict) -> di
     }
 
 
-
 def build_valuestream_record(ticket_id: str, result: dict) -> dict:
     sup = result.get("supervision", {})
     obs = result.get("observed", {})
@@ -268,7 +261,6 @@ def build_valuestream_record(ticket_id: str, result: dict) -> dict:
 # Runtime helpers
 # ---------------------------------------------------------------------------
 
-
 def _create_memory_indexes() -> Tuple[Any, Any, Any, Any]:
     try:
         return create_indexes(
@@ -278,7 +270,6 @@ def _create_memory_indexes() -> Tuple[Any, Any, Any, Any]:
         )
     except TypeError:
         return create_indexes(backend="memory")
-
 
 
 def _try_build_llm(model: str = "gpt-4o-mini") -> OpenAICompatibleLLM | None:
@@ -292,22 +283,49 @@ def _try_build_llm(model: str = "gpt-4o-mini") -> OpenAICompatibleLLM | None:
         return None
 
 
+def _set_if_present(cfg: JiraIngestionConfig, name: str, value: Any) -> None:
+    if hasattr(cfg, name):
+        setattr(cfg, name, value)
+    else:
+        logger.info("Config field not present in this repo version: %s", name)
+
 
 def build_config() -> JiraIngestionConfig:
-    return JiraIngestionConfig(
+    cfg = JiraIngestionConfig(
         llm_model="gpt-5-mini-idp",
         embedding_model=EMBEDDING_MODEL,
-        section_only_chunks=True,
+
+        # verify-only run: do not persist pipeline artifacts locally
         enable_raw_artifact_persistence=False,
         enable_attachment_text_persistence=False,
         enable_debug_stage_persistence=False,
         enable_prechunk_persistence=False,
+
+        # these are still useful for verification JSON
         enable_attachment_inventory=True,
         enable_retrieval_views=True,
+
+        # cheaper verify pass
         skip_llm_summary=True,
         skip_llm_keywords=False,
         skip_llm_derived=True,
     )
+
+    # ---- Critical fixes for multi-doc verification ----
+    # Do NOT collapse final retrieval to section chunks only.
+    _set_if_present(cfg, "section_only_chunks", False)
+
+    # Let shorter supporting docs still participate.
+    _set_if_present(cfg, "section_min_slides", 1)
+
+    # Avoid starving valid chunk candidates during prefetch / extraction.
+    _set_if_present(cfg, "max_prefetch_attachments", None)
+    _set_if_present(cfg, "max_chunk_attachments", 10)
+
+    # Only set if your config supports it.
+    _set_if_present(cfg, "include_section_rollups_in_retrieval", False)
+
+    return cfg
 
 
 async def process_ticket(
@@ -344,12 +362,26 @@ async def process_ticket(
         supervision_store=supervision_store,
         config=cfg,
         llm_client=llm_client,
-        embedding_client=None,  # verify-only run: no local vectors / no embedding cost
+        embedding_client=None,   # verify-only: no embedding cost / no local vectors
         storage_dir=None,        # do not write pipeline debug artifacts locally
     )
 
     obs = result.get("observed", {})
     meta = obs.get("metadata", {})
+
+    logger.info(
+        "%s observed chunks=%d attachment refs=%s",
+        ticket_id,
+        len(obs.get("chunks", []) or []),
+        sorted({
+            (
+                str(c.get("attachment_id") or ""),
+                str(c.get("attachment_name") or ""),
+            )
+            for c in (obs.get("chunks", []) or [])
+            if c.get("attachment_id") or c.get("attachment_name")
+        }),
+    )
 
     chunk_records = [
         build_chunk_record(c, ticket_id, obs, meta)
@@ -393,7 +425,10 @@ async def main() -> None:
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
 
-    async def _guarded(ticket_id: str, client: JiraValueStreamClient) -> Tuple[str, Optional[List[dict]], Optional[dict], Optional[str]]:
+    async def _guarded(
+        ticket_id: str,
+        client: JiraValueStreamClient,
+    ) -> Tuple[str, Optional[List[dict]], Optional[dict], Optional[str]]:
         async with sem:
             try:
                 chunks, vs_map = await process_ticket(
@@ -455,7 +490,11 @@ async def main() -> None:
     print(f"Chunk index records: {OUTPUT_DIR / '_all_chunks.json'}")
     print(f"VS map records:      {OUTPUT_DIR / '_all_valuestream_maps.json'}")
     for m in all_vs_maps:
-        print(f"  {m['ticketId']}: {OUTPUT_DIR / m['ticketId'] / '07_chunks.json'}, {OUTPUT_DIR / m['ticketId'] / '08_valuestream_map.json'}")
+        print(
+            f"  {m['ticketId']}: "
+            f"{OUTPUT_DIR / m['ticketId'] / '07_chunks.json'}, "
+            f"{OUTPUT_DIR / m['ticketId'] / '08_valuestream_map.json'}"
+        )
     if errors:
         print("Errors:")
         for e in errors:
