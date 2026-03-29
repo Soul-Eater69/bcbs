@@ -1,260 +1,220 @@
+"""
+Upload local per-ticket chunk files to Azure AI Search.
+
+Reads only individual files:
+  <base_dir>/<ticket_id>/07_chunks.json
+
+It does NOT read <base_dir>/_all_chunks.json.
+
+Fixes:
+- normalizes timezone offsets like -0500 -> -05:00
+- fills missing createdDate with updatedDate, else current UTC time
+- fills missing updatedDate with current UTC time
+- preserves nested chunkProvenance ranges
+"""
+
 from __future__ import annotations
 
 import argparse
-import asyncio
+import glob
 import json
-import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
-# Prefer package exports the repo already uses.
-from jira_ingestion import JiraIngestionConfig, JiraValueStreamClient
+from azure.identity import ClientSecretCredential
+from azure.search.documents import SearchClient
 
-# Triage imports with compatibility for older/newer naming.
-try:
-    from jira_ingestion.ingestion.triage import (
-        triage_attachments,
-        get_chunking_candidates,
-        build_triage_artifact,
-    )
-except ImportError as exc:
-    raise RuntimeError("Could not import triage APIs from jira_ingestion.ingestion.triage") from exc
-
-try:
-    from jira_ingestion.ingestion.triage import layer0_filter, layer1_score  # type: ignore
-except Exception:
-    try:
-        from jira_ingestion.ingestion.triage import Layer0_filter as layer0_filter  # type: ignore
-        from jira_ingestion.ingestion.triage import Layer1_score as layer1_score  # type: ignore
-    except Exception:
-        layer0_filter = None  # type: ignore
-        layer1_score = None  # type: ignore
+from src import config
 
 
-def _attachment_key(att: dict) -> str:
-    return str(att.get("id") or att.get("filename") or "")
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def _simple_attachment_view(att: dict) -> dict:
-    return {
-        "id": str(att.get("id") or ""),
-        "filename": att.get("filename", ""),
-        "ext": att.get("ext", ""),
-        "size": att.get("size", 0),
-        "mimeType": att.get("mimeType", att.get("mime_type", "")),
-        "created": att.get("created", ""),
-        "reporter_upload": att.get("reporter_upload", False),
-        "triage_score": att.get("triage_score"),
-        "triage_reasons": att.get("triage_reasons", []),
-    }
+def _normalize_datetime_offset(value: Any) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+
+    value = value.strip()
+    if not value:
+        return None
+
+    # Convert timezone offset from -0600 -> -06:00
+    match = re.match(r"^(.*)([+-]\d{2})(\d{2})$", value)
+    if match:
+        return f"{match.group(1)}{match.group(2)}:{match.group(3)}"
+
+    return value
 
 
-async def _download_probe(jira_client: JiraValueStreamClient, att: dict) -> dict:
-    try:
-        data = await jira_client.download_attachment(att)
-        return {
-            "id": _attachment_key(att),
-            "filename": att.get("filename", ""),
-            "download_ok": bool(data),
-            "bytes": len(data) if data else 0,
-        }
-    except Exception as exc:
-        return {
-            "id": _attachment_key(att),
-            "filename": att.get("filename", ""),
-            "download_ok": False,
-            "bytes": 0,
-            "error": str(exc),
-        }
+def _resolve_dates(created: Any, updated: Any) -> tuple[str, str]:
+    created_norm = _normalize_datetime_offset(created)
+    updated_norm = _normalize_datetime_offset(updated)
+
+    now_iso = _utc_now_iso()
+
+    if updated_norm is None:
+        updated_norm = now_iso
+    if created_norm is None:
+        created_norm = updated_norm or now_iso
+
+    return str(created_norm), str(updated_norm)
 
 
-async def debug_one_ticket(
-    ticket_id: str,
-    jira_client: JiraValueStreamClient,
-    cfg: JiraIngestionConfig,
-    out_dir: Optional[Path],
-    probe_downloads: bool,
-) -> dict:
-    ticket_data = await jira_client.get_ticket_data(ticket_id, config=cfg)
-    fields = ticket_data.get("fields", {})
-    attachments = ticket_data.get("attachments", []) or []
-    ticket_summary = str(fields.get("summary") or ticket_id)
+def _build_safe_id(source_id: str, chunk_id: str, chunk_index: Any) -> str:
+    raw = f"{source_id}|{chunk_id}|{chunk_index}"
+    return re.sub(r"[^A-Za-z0-9_\-=]", "_", raw)
 
-    report: dict[str, Any] = {
-        "ticket_id": ticket_id,
-        "summary": ticket_summary,
-        "attachment_count": len(attachments),
-        "all_attachments": [_simple_attachment_view(a) for a in attachments],
-    }
 
-    if layer0_filter is not None:
-        try:
-            l0 = layer0_filter(attachments)
-            report["layer0_survivors"] = [_simple_attachment_view(a) for a in l0]
-        except Exception as exc:
-            report["layer0_error"] = str(exc)
-            l0 = []
-    else:
-        report["layer0_survivors"] = "layer0_filter not importable in this version"
-        l0 = attachments
+def _load_ticket_chunk_files(base_dir: Path) -> list[Path]:
+    pattern = str(base_dir / "*" / "07_chunks.json")
+    return [Path(p) for p in sorted(glob.glob(pattern))]
 
-    if layer1_score is not None:
-        try:
-            l1 = layer1_score(l0)
-            report["layer1_scored"] = [_simple_attachment_view(a) for a in l1]
-        except Exception as exc:
-            report["layer1_error"] = str(exc)
-    else:
-        report["layer1_scored"] = "layer1_score not importable in this version"
 
-    async def download_fn(att: dict) -> bytes:
-        return await jira_client.download_attachment(att)
+def _load_documents(files: list[Path]) -> tuple[list[dict], dict[str, int]]:
+    docs: list[dict] = []
+    per_ticket_counts: dict[str, int] = {}
 
-    primary, supporting, att_quality, triage_artifact = await _maybe_async_triage(
-        attachments=attachments,
-        ticket_summary=ticket_summary,
-        download_fn=download_fn,
-    )
+    for file_path in files:
+        ticket_id = file_path.parent.name
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+        chunks = payload.get("chunks", [])
+        per_ticket_counts[ticket_id] = len(chunks)
 
-    # Some versions return a triage artifact directly, some need it built.
-    if triage_artifact is None:
-        try:
-            all_scored = layer1_score(layer0_filter(attachments)) if layer0_filter and layer1_score else []
-            triage_artifact = build_triage_artifact(
-                primary=primary,
-                supplementary=supporting,
-                att_quality=att_quality,
-                all_scored=all_scored,
-                total_attachment_count=len(attachments),
+        for doc in chunks:
+            item = dict(doc)
+
+            # Fill/normalize top-level date fields for Azure Edm.DateTimeOffset
+            created_date, updated_date = _resolve_dates(
+                item.get("createdDate"),
+                item.get("updatedDate"),
             )
-        except Exception as exc:
-            triage_artifact = {"error": f"Could not build triage artifact: {exc}"}
+            item["createdDate"] = created_date
+            item["updatedDate"] = updated_date
 
-    chunk_candidates = []
-    try:
-        chunk_candidates = get_chunking_candidates(triage_artifact)
-    except Exception as exc:
-        report["chunk_candidate_error"] = str(exc)
+            provenance = dict(item.get("chunkProvenance") or {})
+            if provenance.get("pageRange") is None:
+                provenance["pageRange"] = []
+            if provenance.get("slideRange") is None:
+                provenance["slideRange"] = []
+            item["chunkProvenance"] = provenance
 
-    report["triage"] = {
-        "att_quality": att_quality,
-        "primary": _simple_attachment_view(primary) if primary else None,
-        "supporting": [_simple_attachment_view(a) for a in supporting],
-        "chunk_candidates": [_simple_attachment_view(a) for a in chunk_candidates],
-        "artifact": triage_artifact,
-    }
+            source_id = str(item.get("sourceId") or "")
+            chunk_id = str(provenance.get("chunkId") or item.get("id") or "")
+            chunk_index = provenance.get("chunkIndex", 0)
 
-    if probe_downloads:
-        probes = await asyncio.gather(*[_download_probe(jira_client, a) for a in chunk_candidates])
-        report["download_probe"] = probes
+            item["id"] = _build_safe_id(source_id, chunk_id, chunk_index)
+            item["@search.action"] = "mergeOrUpload"
 
-    if out_dir:
-        ticket_out = out_dir / ticket_id
-        ticket_out.mkdir(parents=True, exist_ok=True)
-        with open(ticket_out / "triage_debug.json", "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False, default=str)
+            docs.append(item)
 
-    return report
+    return docs, per_ticket_counts
 
 
-async def _maybe_async_triage(**kwargs):
-    result = triage_attachments(**kwargs)
-    if asyncio.iscoroutine(result):
-        result = await result
-
-    # Expected new shape: (primary, supporting, att_quality, triage_artifact)
-    if isinstance(result, tuple) and len(result) == 4:
-        return result
-
-    # Older shape: (primary, supporting, att_quality)
-    if isinstance(result, tuple) and len(result) == 3:
-        primary, supporting, att_quality = result
-        return primary, supporting, att_quality, None
-
-    raise RuntimeError(f"Unexpected triage_attachments return shape: {type(result)} {result!r}")
+def _get_client(index_name: str) -> SearchClient:
+    credential = ClientSecretCredential(
+        tenant_id=config.AZURE_TENANT_ID,
+        client_id=config.AZURE_CLIENT_ID,
+        client_secret=config.AZURE_CLIENT_SECRET,
+    )
+    return SearchClient(
+        endpoint=config.AZURE_SEARCH_ENDPOINT,
+        index_name=index_name,
+        credential=credential,
+    )
 
 
-def _print_report(report: dict) -> None:
-    print("=" * 90)
-    print(f"TICKET: {report['ticket_id']}")
-    print(f"SUMMARY: {report['summary']}")
-    print(f"ATTACHMENTS: {report['attachment_count']}")
-    print("\nALL ATTACHMENTS:")
-    for a in report.get("all_attachments", []):
-        print(f"  - {a['id']:>8} | {a['ext']:<5} | {a['size']:>9} | {a['filename']}")
+def _clear_existing_documents(client: SearchClient) -> int:
+    to_delete = []
+    for row in client.search(search_text="*", select=["id"], top=1000):
+        doc_id = row.get("id") if isinstance(row, dict) else row["id"]
+        if doc_id:
+            to_delete.append({"id": doc_id, "@search.action": "delete"})
 
-    triage = report.get("triage", {})
-    primary = triage.get("primary")
-    print("\nTRIAGE RESULT:")
-    print(f"  att_quality: {triage.get('att_quality')}")
-    print(f"  primary: {primary['filename']}" if primary else "  primary: None")
+    if not to_delete:
+        return 0
 
-    print("  supporting:")
-    for a in triage.get("supporting", []):
-        print(f"    - {a['filename']} ({a.get('ext')}, score={a.get('triage_score')})")
-
-    print("  chunk_candidates:")
-    for a in triage.get("chunk_candidates", []):
-        print(f"    - {a['filename']} ({a.get('ext')}, score={a.get('triage_score')})")
-
-    artifact = triage.get("artifact", {}) or {}
-    if isinstance(artifact, dict):
-        plan = artifact.get("processing_plan") or {}
-        excluded = artifact.get("excluded_attachments") or []
-        print("\nPROCESSING PLAN:")
-        if plan:
-            for k, v in plan.items():
-                print(f"  {k}: {v}")
-        else:
-            print("  <none in artifact>")
-
-        print("\nEXCLUDED ATTACHMENTS:")
-        if excluded:
-            for x in excluded:
-                if isinstance(x, dict):
-                    print(f"  - {x.get('filename', x.get('id', ''))}")
-                else:
-                    print(f"  - {x}")
-        else:
-            print("  <none>")
-
-    if report.get("download_probe"):
-        print("\nDOWNLOAD PROBE:")
-        for d in report["download_probe"]:
-            ok = "OK" if d.get("download_ok") else "FAIL"
-            print(f"  - [{ok}] {d['filename']} bytes={d.get('bytes', 0)}")
-            if d.get("error"):
-                print(f"      error={d['error']}")
+    client.delete_documents(documents=to_delete)
+    return len(to_delete)
 
 
-async def main() -> None:
-    parser = argparse.ArgumentParser(description="Debug Jira attachment triage for one or more tickets.")
-    parser.add_argument("tickets", nargs="+", help="Ticket ids, e.g. IDMT-1320")
-    parser.add_argument("--out-dir", default="triage_debug", help="Where to save triage_debug.json files")
-    parser.add_argument("--no-save", action="store_true", help="Do not write JSON files")
-    parser.add_argument("--probe-downloads", action="store_true", help="Try downloading chunk candidates")
-    parser.add_argument("--verify-ssl", action="store_true", help="Enable SSL verification for Jira client")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Upload local per-ticket chunk files to Azure AI Search")
+    parser.add_argument(
+        "--base-dir",
+        default="ticket_chunks",
+        help="Folder containing per-ticket 07_chunks.json files",
+    )
+    parser.add_argument(
+        "--index",
+        default="idmt_data",
+        help="Target Azure Search index",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="Upload batch size",
+    )
+    parser.add_argument(
+        "--clear-existing",
+        action="store_true",
+        help="Delete existing docs in target index before upload",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Read/transform docs only, do not upload",
+    )
     args = parser.parse_args()
 
-    base_url = os.environ.get("JIRA_BASE_URL")
-    token = os.environ.get("JIRA_TOKEN")
-    if not base_url or not token:
-        raise RuntimeError("Set JIRA_BASE_URL and JIRA_TOKEN in the environment before running.")
+    files = _load_ticket_chunk_files(Path(args.base_dir))
+    if not files:
+        raise SystemExit(f"No per-ticket chunk files found under: {args.base_dir}")
 
-    cfg = JiraIngestionConfig()
-    out_dir = None if args.no_save else Path(args.out_dir)
+    docs, per_ticket_counts = _load_documents(files)
+    unique_ids = {d["id"] for d in docs}
 
-    async with JiraValueStreamClient(base_url=base_url, token=token, verify_ssl=args.verify_ssl) as jira_client:
-        for ticket_id in args.tickets:
-            report = await debug_one_ticket(
-                ticket_id=ticket_id,
-                jira_client=jira_client,
-                cfg=cfg,
-                out_dir=out_dir,
-                probe_downloads=args.probe_downloads,
-            )
-            _print_report(report)
+    print(f"ticket_files={len(files)}")
+    for ticket_id in sorted(per_ticket_counts):
+        print(f"{ticket_id}: chunks={per_ticket_counts[ticket_id]}")
+    print(f"total_docs={len(docs)}")
+    print(f"unique_ids={len(unique_ids)}")
+
+    same_created_updated = sum(
+        1 for d in docs if d.get("createdDate") == d.get("updatedDate")
+    )
+    print(f"created_equals_updated={same_created_updated}")
+
+    if args.dry_run:
+        print("dry_run=True (no Azure writes)")
+        return
+
+    client = _get_client(args.index)
+
+    deleted = 0
+    if args.clear_existing:
+        deleted = _clear_existing_documents(client)
+        print(f"deleted_existing={deleted}")
+
+    uploaded_ok = 0
+    failed = 0
+
+    for start in range(0, len(docs), args.batch_size):
+        batch = docs[start : start + args.batch_size]
+        result = client.upload_documents(documents=batch)
+        uploaded_ok += sum(1 for r in result if getattr(r, "succeeded", False))
+        failed += sum(1 for r in result if not getattr(r, "succeeded", False))
+
+    count_now = client.get_document_count()
+    print(f"uploaded_ok={uploaded_ok}")
+    print(f"failed={failed}")
+    print(f"index_count_now={count_now}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
