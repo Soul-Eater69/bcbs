@@ -1,9 +1,18 @@
 """
+retrieval.py
+
 Retrieval helpers shared by the plain and RAG pipelines.
 
-Includes: retrieval view construction, LLM content analysis, search wrappers,
-candidate aggregation/context-building, historical chunk retrieval, KG candidate
-retrieval, and candidate sanitisation.
+Includes:
+- retrieval view construction
+- LLM content analysis
+- search wrappers
+- candidate aggregation / context-building
+- historical chunk retrieval
+- local ticket->value-stream map loading
+- historical ticket->value-stream support building
+- KG candidate retrieval
+- LLM output sanitization
 """
 
 from __future__ import annotations
@@ -18,17 +27,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.clients.azure_direct_client import AzureDirectSearchClient
 from src.services.generation_service import GenerationService
+
 from core.constants import CANONICAL_VALUE_STREAMS, PRECHUNK_DIR
-from core.text import clean_ppt_text, extract_signal_sections, normalize_for_search
 from core.prompts import safe_json_extract
+from core.text import clean_ppt_text, extract_signal_sections, normalize_for_search
 
 logger = logging.getLogger(__name__)
 
 
-# --- Simple search wrapper ----------------------------------------------------
+# ---------------------------------------------------------------------------
+# Simple search wrapper
+# ---------------------------------------------------------------------------
 
 def run_vector_search(query: str, top_k: int = 15) -> List[dict]:
-    """Run a plain vector search against the KG index and return results."""
+    """Run a plain vector search against the default KG index and return results."""
     client = AzureDirectSearchClient()
     results = client.search_vector(query, top_k=top_k)
     if not results:
@@ -45,7 +57,9 @@ def run_vector_search(query: str, top_k: int = 15) -> List[dict]:
     ]
 
 
-# --- Content analysis (LLM) ---------------------------------------------------
+# ---------------------------------------------------------------------------
+# Content analysis (LLM)
+# ---------------------------------------------------------------------------
 
 def analyze_idea_card_content(raw_text: str) -> dict:
     """Use LLM to extract healthcare domain concepts for retrieval."""
@@ -90,7 +104,9 @@ Return JSON in this exact format:
         }
 
 
-# --- Retrieval views ----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Retrieval views
+# ---------------------------------------------------------------------------
 
 def build_retrieval_views(raw_text: str) -> List[str]:
     """Build multiple retrieval views from the idea-card PPT content."""
@@ -134,12 +150,13 @@ def build_retrieval_views(raw_text: str) -> List[str]:
         domain_kw += " compliance regulatory requirements ensure compliance " + " ".join(
             analysis.get("regulatory_themes", [])
         )
-    domain_kw += " " + common_kw
 
+    domain_kw += " " + common_kw
     view6 = normalize_for_search(domain_kw, max_chars=1200)
 
     deduped: List[str] = []
     seen: set[str] = set()
+
     for view in [view1, view2, view3, view4, view5, view6]:
         key = view.strip().lower()
         if key and key not in seen:
@@ -149,7 +166,9 @@ def build_retrieval_views(raw_text: str) -> List[str]:
     return deduped
 
 
-# --- Candidate helpers --------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Candidate helpers
+# ---------------------------------------------------------------------------
 
 def is_canonical_value_stream(entity_name: str) -> bool:
     name_lower = entity_name.lower().strip()
@@ -168,16 +187,19 @@ def aggregate_matches(all_matches: List[dict]) -> List[dict]:
         score = match.get("@search.reranker_score", match.get("@search.score", 0.0)) or 0.0
 
         if entity_id not in by_id:
-            by_id[entity_id] = {"doc": match, "best_score": score, "support_count": 1}
-            continue
+            by_id[entity_id] = {
+                "doc": match,
+                "best_score": score,
+                "support_count": 1,
+            }
+        else:
+            entry = by_id[entity_id]
+            entry["best_score"] = max(entry["best_score"], score)
+            entry["support_count"] += 1
 
-        entry = by_id[entity_id]
-        entry["best_score"] = max(entry["best_score"], score)
-        entry["support_count"] += 1
-
-        current = entry["doc"].get("@search.reranker_score", entry["doc"].get("@search.score", 0.0)) or 0.0
-        if score > current:
-            entry["doc"] = match
+            current = entry["doc"].get("@search.reranker_score", entry["doc"].get("@search.score", 0.0)) or 0.0
+            if score > current:
+                entry["doc"] = match
 
     ranked = sorted(by_id.values(), key=lambda row: (row["support_count"], row["best_score"]), reverse=True)
 
@@ -212,8 +234,10 @@ def build_context(matches: List[dict]) -> str:
         if match.get("properties"):
             try:
                 props = json.loads(match["properties"]) if isinstance(match["properties"], str) else match["properties"]
+
                 if props.get("value_stream_value_proposition"):
                     block += f"\nValue Proposition: {props['value_stream_value_proposition']}"
+
                 if props.get("value_stream_trigger"):
                     block += f"\nTrigger: {props['value_stream_trigger']}"
 
@@ -227,6 +251,7 @@ def build_context(matches: List[dict]) -> str:
                         block += f"\n  {idx}. {stage_name}"
                         if stage.get("value_stream_stage_description"):
                             block += f" - {stage['value_stream_stage_description']}"
+
             except (json.JSONDecodeError, TypeError, KeyError):
                 pass
 
@@ -235,7 +260,82 @@ def build_context(matches: List[dict]) -> str:
     return "\n\n".join(parts)
 
 
-# --- RAG: historical chunk retrieval ------------------------------------------
+# ---------------------------------------------------------------------------
+# Historical chunk provenance helpers
+# ---------------------------------------------------------------------------
+
+def _parse_chunk_provenance(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return json.loads(value)
+        except Exception:
+            return {}
+    return {}
+
+
+def _range_label(value: Any, prefix: str) -> str:
+    if isinstance(value, list) and value:
+        nums = [x for x in value if isinstance(x, int)]
+        if nums:
+            if len(nums) == 1:
+                return f"{prefix}-{nums[0]}"
+            return f"{prefix}-{nums[0]}-{nums[-1]}"
+    return ""
+
+
+def _build_chunk_ref(chunk: dict) -> str:
+    """
+    Build a stable human-readable chunk reference from chunkProvenance.
+    Prefer chunkId if present. Never emit page-?.
+    """
+    prov = _parse_chunk_provenance(chunk.get("chunkProvenance"))
+
+    chunk_id = str(prov.get("chunkId") or "").strip()
+    chunk_index = prov.get("chunkIndex")
+    source_type = str(prov.get("sourceType") or "").strip()
+    attachment_id = str(prov.get("attachmentId") or "").strip()
+
+    page_label = _range_label(prov.get("pageRange"), "page")
+    slide_label = _range_label(prov.get("slideRange"), "slide")
+
+    parts: List[str] = []
+    if attachment_id:
+        parts.append(f"att-{attachment_id}")
+
+    if source_type:
+        parts.append(source_type)
+
+    if page_label:
+        parts.append(page_label)
+    elif slide_label:
+        parts.append(slide_label)
+
+    if chunk_id:
+        parts.append(chunk_id)
+    elif chunk_index is not None:
+        parts.append(f"chunk-{chunk_index}")
+
+    if parts:
+        return ":".join(parts)
+
+    return str(chunk.get("id") or "").strip()
+
+
+def _chunk_provenance_label(chunk: dict) -> str:
+    prov = _parse_chunk_provenance(chunk.get("chunkProvenance"))
+    page_label = _range_label(prov.get("pageRange"), "page")
+    slide_label = _range_label(prov.get("slideRange"), "slide")
+    source_type = str(prov.get("sourceType") or "").strip()
+
+    parts = [p for p in [source_type, page_label or slide_label] if p]
+    return ":".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# RAG: historical chunk retrieval
+# ---------------------------------------------------------------------------
 
 def retrieve_historical_chunks(
     ppt_text: str,
@@ -248,7 +348,15 @@ def retrieve_historical_chunks(
     views = build_retrieval_views(ppt_text)
     logger.info("[RAG-RETRIEVE] Built %d retrieval views", len(views))
 
-    select_fields = ["id", "sourceId", "title", "content", "contextKeywords", "chunkProvenance"]
+    select_fields = [
+        "id",
+        "sourceId",
+        "title",
+        "content",
+        "contextKeywords",
+        "chunkProvenance",
+    ]
+
     all_matches: List[dict] = []
 
     for view in views:
@@ -269,6 +377,7 @@ def retrieve_historical_chunks(
                     matches = client.search_bm25(view, top_k=top_k_per_view, select=select_fields)
                 except Exception:
                     matches = []
+
         all_matches.extend(matches or [])
 
     by_id: Dict[str, dict] = {}
@@ -278,9 +387,12 @@ def retrieve_historical_chunks(
             continue
 
         score = float(match.get("@search.reranker_score", match.get("@search.score", 0.0)) or 0.0)
+
         if doc_id not in by_id or score > by_id[doc_id]["_score"]:
             row = dict(match)
             row["_score"] = score
+            row["_chunk_ref"] = _build_chunk_ref(row)
+            row["_provenance_label"] = _chunk_provenance_label(row)
             by_id[doc_id] = row
 
     ranked = sorted(by_id.values(), key=lambda row: row.get("_score", 0.0), reverse=True)
@@ -299,7 +411,9 @@ def retrieve_historical_chunks(
     return ranked
 
 
-# --- RAG: Local ticket -> VS mappings -----------------------------------------
+# ---------------------------------------------------------------------------
+# RAG: local ticket -> value stream mappings
+# ---------------------------------------------------------------------------
 
 def load_ticket_vs_maps(base_dir: str | pathlib.Path | None = None) -> Dict[str, dict]:
     """Load 08_valuestream_map.json files from the prechunk output directory."""
@@ -309,6 +423,7 @@ def load_ticket_vs_maps(base_dir: str | pathlib.Path | None = None) -> Dict[str,
     for path in sorted(glob.glob(str(base / "**" / "08_valuestream_map.json"))):
         with open(path, encoding="utf-8") as f:
             record = json.load(f)
+
         ticket_id = str(record.get("ticketId") or "").strip()
         if ticket_id:
             mapping[ticket_id] = record
@@ -320,11 +435,16 @@ def load_ticket_vs_maps(base_dir: str | pathlib.Path | None = None) -> Dict[str,
         with_vs,
         len(mapping) - with_vs,
     )
+
     if with_vs == 0 and mapping:
         logger.warning("[RAG-MAPS] *** ALL ticket VS maps are EMPTY ***")
 
     return mapping
 
+
+# ---------------------------------------------------------------------------
+# RAG: map retrieved chunks -> ticket VS evidence
+# ---------------------------------------------------------------------------
 
 def build_historical_vs_evidence(
     chunks: List[dict],
@@ -340,19 +460,25 @@ def build_historical_vs_evidence(
             continue
 
         score = float(chunk.get("_score", 0.0) or 0.0)
-        chunk_id = str(chunk.get("id") or "")
+        raw_doc_id = str(chunk.get("id") or "").strip()
+        chunk_ref = str(chunk.get("_chunk_ref") or _build_chunk_ref(chunk)).strip()
 
         if ticket_id not in ticket_hits:
             ticket_hits[ticket_id] = {
                 "ticket_id": ticket_id,
                 "best_score": score,
-                "matched_chunk_ids": [chunk_id] if chunk_id else [],
+                "matched_chunk_ids": [chunk_ref] if chunk_ref else [],
+                "matched_doc_ids": [raw_doc_id] if raw_doc_id else [],
                 "title": chunk.get("title", ""),
             }
         else:
             ticket_hits[ticket_id]["best_score"] = max(ticket_hits[ticket_id]["best_score"], score)
-            if chunk_id and chunk_id not in ticket_hits[ticket_id]["matched_chunk_ids"]:
-                ticket_hits[ticket_id]["matched_chunk_ids"].append(chunk_id)
+
+            if chunk_ref and chunk_ref not in ticket_hits[ticket_id]["matched_chunk_ids"]:
+                ticket_hits[ticket_id]["matched_chunk_ids"].append(chunk_ref)
+
+            if raw_doc_id and raw_doc_id not in ticket_hits[ticket_id]["matched_doc_ids"]:
+                ticket_hits[ticket_id]["matched_doc_ids"].append(raw_doc_id)
 
     ranked_tickets = sorted(
         ticket_hits.values(),
@@ -369,6 +495,7 @@ def build_historical_vs_evidence(
         names = vs_record.get("valueStreamNames") or []
         ids = vs_record.get("valueStreamIds") or []
         statuses = vs_record.get("valueStreamStatuses") or []
+        jira_theme_ids = vs_record.get("jiraThemeIds") or []
 
         for idx, name in enumerate(names):
             vs_name = str(name or "").strip()
@@ -379,10 +506,12 @@ def build_historical_vs_evidence(
                 support_by_vs[vs_name] = {
                     "entity_name": vs_name,
                     "entity_id": ids[idx] if idx < len(ids) else "",
+                    "source_theme_id": jira_theme_ids[idx] if idx < len(jira_theme_ids) else "",
                     "statuses": [],
                     "support_count": 0,
                     "supporting_ticket_ids": [],
                     "supporting_chunk_ids": [],
+                    "supporting_doc_ids": [],
                     "best_support_score": 0.0,
                 }
 
@@ -393,9 +522,13 @@ def build_historical_vs_evidence(
             if hit["ticket_id"] not in entry["supporting_ticket_ids"]:
                 entry["supporting_ticket_ids"].append(hit["ticket_id"])
 
-            for chunk_id in hit["matched_chunk_ids"][:5]:
-                if chunk_id and chunk_id not in entry["supporting_chunk_ids"]:
-                    entry["supporting_chunk_ids"].append(chunk_id)
+            for cid in hit["matched_chunk_ids"][:5]:
+                if cid and cid not in entry["supporting_chunk_ids"]:
+                    entry["supporting_chunk_ids"].append(cid)
+
+            for did in hit.get("matched_doc_ids", [])[:5]:
+                if did and did not in entry["supporting_doc_ids"]:
+                    entry["supporting_doc_ids"].append(did)
 
             if idx < len(statuses):
                 status = str(statuses[idx] or "").strip()
@@ -420,7 +553,9 @@ def build_historical_vs_evidence(
     return ranked_tickets, vs_support
 
 
-# --- RAG: KG candidate retrieval ----------------------------------------------
+# ---------------------------------------------------------------------------
+# RAG: KG candidate retrieval
+# ---------------------------------------------------------------------------
 
 def retrieve_kg_candidates(
     query_text: str,
@@ -488,8 +623,14 @@ def retrieve_kg_candidates(
 
     candidates = sorted(dedup.values(), key=lambda row: row.get("score", 0.0), reverse=True)
     logger.info("[RAG-KG] %d KG candidates retrieved", len(candidates))
+
     for idx, row in enumerate(candidates[:10], 1):
-        logger.info("[RAG-KG]   #%d: %s (score=%.4f)", idx, row["entity_name"], row.get("score", 0.0))
+        logger.info(
+            "[RAG-KG]   #%d: %s (score=%.4f)",
+            idx,
+            row["entity_name"],
+            row.get("score", 0.0),
+        )
 
     if allowed_names:
         existing = {normalize_for_search(row["entity_name"]) for row in candidates if row.get("entity_name")}
@@ -510,7 +651,9 @@ def retrieve_kg_candidates(
     return candidates
 
 
-# --- Sanitisation -------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# LLM output sanitization
+# ---------------------------------------------------------------------------
 
 def sanitize_selected(parsed: dict, candidates: List[dict]) -> dict:
     """Match LLM-selected VS names back to valid candidates."""
@@ -537,6 +680,7 @@ def sanitize_selected(parsed: dict, candidates: List[dict]) -> dict:
     for row in parsed.get("selected_value_streams") or []:
         raw_name = str(row.get("entity_name") or row.get("name") or "").strip()
         raw_id = str(row.get("entity_id") or "").strip().lower()
+
         if not raw_name:
             continue
 
@@ -544,24 +688,33 @@ def sanitize_selected(parsed: dict, candidates: List[dict]) -> dict:
         method = "none"
 
         if raw_id and raw_id in by_id:
-            candidate, method = by_id[raw_id], "entity_id"
-        if candidate is None and (c := by_name.get(raw_name.lower())):
-            candidate, method = c, "exact_name"
-        if candidate is None and (c := by_norm.get(_norm(raw_name))):
-            candidate, method = c, "normalized"
+            candidate = by_id[raw_id]
+            method = "entity_id"
+
+        if candidate is None and raw_name.lower() in by_name:
+            candidate = by_name[raw_name.lower()]
+            method = "exact_name"
+
+        if candidate is None and _norm(raw_name) in by_norm:
+            candidate = by_norm[_norm(raw_name)]
+            method = "normalized"
 
         if candidate is None:
             best = None
             best_score = 0.0
-            for c in candidates:
-                candidate_name = str(c.get("entity_name") or "").strip()
+            for cand in candidates:
+                candidate_name = str(cand.get("entity_name") or "").strip()
                 if not candidate_name:
                     continue
+
                 score = SequenceMatcher(None, _norm(raw_name), _norm(candidate_name)).ratio()
                 if score > best_score:
-                    best_score, best = score, c
+                    best_score = score
+                    best = cand
+
             if best and best_score >= 0.75:
-                candidate, method = best, f"fuzzy({best_score:.2f})"
+                candidate = best
+                method = f"fuzzy({best_score:.2f})"
 
         if candidate is None:
             logger.warning("[SANITIZE] DROPPED: '%s'", raw_name)
@@ -573,6 +726,7 @@ def sanitize_selected(parsed: dict, candidates: List[dict]) -> dict:
             candidate.get("entity_name", "?"),
             method,
         )
+
         selected.append(
             {
                 "entity_id": row.get("entity_id") or candidate.get("entity_id", ""),
@@ -586,9 +740,11 @@ def sanitize_selected(parsed: dict, candidates: List[dict]) -> dict:
 
     parsed["selected_value_streams"] = selected
     parsed["rejected_candidates"] = parsed.get("rejected_candidates") or []
+
     logger.info(
         "[SANITIZE] Result: %d kept, %d rejected",
         len(selected),
         len(parsed["rejected_candidates"]),
     )
+
     return parsed
