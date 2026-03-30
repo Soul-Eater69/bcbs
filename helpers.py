@@ -68,4 +68,13 @@ def _compact_vs_support(vs_support: List[dict], limit: int = 8) -> List[dict]:
                 "entity_id": row.get("entity_id") or "",
                 "entity_name": row.get("entity_name") or "",
                 "support_count": int(row.get("support_count") or 0),
-                "best
+                "best_support_score": round(
+                    float(row.get("best_support_score") or row.get("confidence") or row.get("score") or 0.0),
+                    4,
+                ),
+                "supporting_ticket_ids": [str(t) for t in (row.get("supporting_ticket_ids") or [])[:5]],
+                "source_theme_id": row.get("source_theme_id") or "",
+            }
+        )
+
+    return compact
