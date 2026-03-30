@@ -77,7 +77,6 @@ def _chunk_provenance(chunk: dict) -> str:
 
 
 def _limit_historical_chunks(chunks: List[dict], limit: int) -> List[dict]:
-    """Favor diverse tickets plus strong scores."""
     if not chunks:
         return []
 
@@ -120,10 +119,10 @@ def _compact_historical_evidence(chunks: List[dict], limit: int = 6) -> List[dic
         compact.append(
             {
                 "ticket_id": _chunk_ticket_id(chunk),
-                "title": _short(str(chunk.get("title") or chunk.get("ticket_title") or ""), 120),
+                "title": _short(str(chunk.get("title") or ""), 120),
                 "score": round(_chunk_score(chunk), 4),
                 "snippet": _short(_chunk_text(chunk), 280),
-                "provenance": _short(_chunk_provenance(chunk), 100),
+                "provenance": _short(_chunk_provenance_text(chunk), 100),
             }
         )
 
@@ -144,15 +143,15 @@ def _compact_vs_support(vs_support: List[dict], limit: int = 8) -> List[dict]:
     for row in _dedupe_by_name(rows)[:limit]:
         compact.append(
             {
-                "entity_id": row.get("entity_id") or row.get("id") or "",
-                "entity_name": row.get("entity_name") or row.get("name") or "",
+                "entity_id": row.get("entity_id") or "",
+                "entity_name": row.get("entity_name") or "",
                 "support_count": int(row.get("support_count") or 0),
                 "best_support_score": round(
                     float(row.get("best_support_score") or row.get("confidence") or row.get("score") or 0.0),
                     4,
                 ),
-                "supporting_ticket_ids": [str(ticket) for ticket in (row.get("supporting_ticket_ids") or [])[:5]],
-                "supporting_chunk_ids": [str(chunk_id) for chunk_id in (row.get("supporting_chunk_ids") or [])[:5]],
+                "supporting_ticket_ids": [str(t) for t in (row.get("supporting_ticket_ids") or [])[:5]],
+                "source_theme_id": row.get("source_theme_id") or "",
             }
         )
 
