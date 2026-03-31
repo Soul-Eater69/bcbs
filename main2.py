@@ -1,301 +1,127 @@
-import os
-import json
-import re
-from pathlib import Path
-from typing import List, Any
+async def debug_one_ticket(
+    ticket_id: str,
+    jira_client: JiraValueStreamClient,
+    cfg: JiraIngestionConfig,
+    out_dir: Optional[Path],
+    probe_downloads: bool,
+) -> dict:
+    ticket_data = await jira_client.get_ticket_data(ticket_id, config=cfg)
+    fields = ticket_data.get("fields", {})
+    attachments = ticket_data.get("attachments", []) or []
+    ticket_summary = str(fields.get("summary") or ticket_id)
 
-from src.clients.llm import IDPChatOpenAI
+    report: dict[str, Any] = {
+        "ticket_id": ticket_id,
+        "summary": ticket_summary,
+        "attachment_count": len(attachments),
+        "all_attachments": [_simple_attachment_view(a) for a in attachments],
+    }
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-CHUNKS_DIR = Path("jira_prechunk_output")
-CHUNKS_FILENAME = "07_chunks.json"
-MODEL = "gpt-5-mini-idp"
-KEYWORDS_PER_CHUNK = 8
-MAX_TEXT_LEN = 1200
-
-# Words/phrases too generic to be useful as retrieval keywords by themselves
-GENERIC_KEYWORDS = {
-    "project",
-    "initiative",
-    "support",
-    "business",
-    "solution",
-    "process",
-    "team",
-    "member",
-    "care",
-    "system",
-    "platform",
-    "improvement",
-    "program",
-    "service",
-    "workflow",
-    "operations",
-    "data",
-    "information",
-    "details",
-    "issue",
-    "work",
-}
-
-
-# ============================================================
-# PROMPT
-# ============================================================
-
-PROMPT = (
-    "Extract 5 to 8 high-value retrieval keywords from the text below. "
-    "Focus on specific business terms, domain phrases, workflows, products, capabilities, or problem areas "
-    "that would help semantic search for Jira tickets, idea cards, value streams, stages, or impacted products. "
-    "Prefer short noun phrases over vague single words. "
-    "Use only terms clearly grounded in the text. "
-    "Avoid generic words like 'project', 'business', 'process', 'solution', 'support', 'team', 'member', "
-    "or 'care' unless they appear as part of a specific phrase. "
-    "Return only a valid JSON array of lowercase strings with no explanation.\n\n"
-    "Text:\n{text}"
-)
-
-
-# ============================================================
-# TEXT HELPERS
-# ============================================================
-
-def clip_text(text: str, limit: int = MAX_TEXT_LEN) -> str:
-    """
-    For long chunks, keep some beginning and some ending context.
-    """
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-
-    head_len = int(limit * 0.67)
-    tail_len = limit - head_len - 5  # account for "\n...\n"
-    head = text[:head_len]
-    tail = text[-tail_len:] if tail_len > 0 else ""
-    return head + "\n...\n" + tail
-
-
-def normalize_keyword(keyword: Any) -> str:
-    kw = str(keyword).strip().lower()
-
-    # collapse whitespace
-    kw = re.sub(r"\s+", " ", kw)
-
-    # trim punctuation edges
-    kw = kw.strip(" ,.;:!?'\"`()[]{}|/\\-")
-
-    return kw
-
-
-def is_useful_keyword(kw: str) -> bool:
-    if not kw:
-        return False
-
-    if len(kw) < 3:
-        return False
-
-    if kw in GENERIC_KEYWORDS:
-        return False
-
-    # discard pure numbers
-    if re.fullmatch(r"\d+", kw):
-        return False
-
-    return True
-
-
-def normalize_keywords(arr: List[Any], max_keywords: int = KEYWORDS_PER_CHUNK) -> List[str]:
-    out: List[str] = []
-    seen = set()
-
-    for item in arr:
-        kw = normalize_keyword(item)
-        if not is_useful_keyword(kw):
-            continue
-        if kw in seen:
-            continue
-        seen.add(kw)
-        out.append(kw)
-
-        if len(out) >= max_keywords:
-            break
-
-    return out
-
-
-# ============================================================
-# PARSING HELPERS
-# ============================================================
-
-def parse_json_array(text: str) -> List[Any]:
-    """
-    Safely parse a JSON array from model output.
-    Handles:
-    - raw JSON arrays
-    - fenced code blocks
-    - extra text around JSON
-    """
-    text = (text or "").strip()
-
-    # 1. direct parse
-    try:
-        data = json.loads(text)
-        if isinstance(data, list):
-            return data
-    except Exception:
-        pass
-
-    # 2. fenced code block
-    fenced_match = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", text, re.IGNORECASE)
-    if fenced_match:
+    if layer0_filter is not None:
         try:
-            data = json.loads(fenced_match.group(1))
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
+            l0 = layer0_filter(attachments)
+            report["layer0_survivors"] = [_simple_attachment_view(a) for a in l0]
+        except Exception as exc:
+            report["layer0_error"] = str(exc)
+            l0 = []
+    else:
+        report["layer0_survivors"] = "layer0_filter not importable in this version"
+        l0 = attachments
 
-    # 3. first array-looking block
-    array_match = re.search(r"\[[\s\S]*\]", text)
-    if array_match:
-        candidate = array_match.group(0)
+    if layer1_score is not None:
         try:
-            data = json.loads(candidate)
-            if isinstance(data, list):
-                return data
-        except Exception:
-            pass
+            l1 = layer1_score(l0)
+            report["layer1_scored"] = [_simple_attachment_view(a) for a in l1]
+        except Exception as exc:
+            report["layer1_error"] = str(exc)
+    else:
+        report["layer1_scored"] = "layer1_score not importable in this version"
 
-    return []
+    # Prefetch once, then pass triage a sync bytes function.
+    prefetched: dict[str, bytes] = {}
+    prefetch_errors: list[dict[str, str]] = []
 
+    for att in attachments:
+        key = _attachment_key(att)
+        try:
+            data = await jira_client.download_attachment(att)
+            if data:
+                prefetched[key] = data
+        except Exception as exc:
+            prefetch_errors.append(
+                {
+                    "id": key,
+                    "filename": str(att.get("filename", "")),
+                    "error": str(exc),
+                }
+            )
 
-# ============================================================
-# LLM EXTRACTION
-# ============================================================
+    report["prefetched"] = {
+        "ok_ids": sorted(prefetched.keys()),
+        "count": len(prefetched),
+        "errors": prefetch_errors,
+    }
 
-def extract_keywords(text: str, llm) -> List[str]:
-    chunk_text = clip_text(text, MAX_TEXT_LEN)
-    prompt = PROMPT.format(text=chunk_text)
+    def cached_download(att: dict) -> bytes:
+        key = _attachment_key(att)
+        data = prefetched.get(key)
+        if data is None:
+            raise RuntimeError(f"No prefetched bytes for attachment: {att.get('filename', key)}")
+        return data
 
-    resp = llm.invoke(
-        [{"role": "user", "content": prompt}],
-        max_completion_tokens=96,
+    primary, supporting, att_quality, triage_artifact = await _maybe_async_triage(
+        attachments=attachments,
+        ticket_summary=ticket_summary,
+        download_fn=cached_download,
     )
 
-    raw_content = getattr(resp, "content", "") or ""
-    arr = parse_json_array(raw_content)
-    kws = normalize_keywords(arr, KEYWORDS_PER_CHUNK)
+    if triage_artifact is None:
+        try:
+            all_scored = layer1_score(layer0_filter(attachments)) if layer0_filter and layer1_score else []
+            triage_artifact = build_triage_artifact(
+                primary=primary,
+                supplementary=supporting,
+                att_quality=att_quality,
+                all_scored=all_scored,
+                total_attachment_count=len(attachments),
+            )
+        except Exception as exc:
+            triage_artifact = {"error": f"Could not build triage artifact: {exc}"}
 
-    return kws
+    chunk_candidates = []
+    try:
+        chunk_candidates = get_chunking_candidates(triage_artifact)
+    except Exception as exc:
+        report["chunk_candidate_error"] = str(exc)
 
+    report["triage"] = {
+        "att_quality": att_quality,
+        "primary": _simple_attachment_view(primary) if primary else None,
+        "supporting": [_simple_attachment_view(a) for a in supporting],
+        "chunk_candidates": [_simple_attachment_view(a) for a in chunk_candidates],
+        "artifact": triage_artifact,
+    }
 
-# ============================================================
-# FILE PROCESSING
-# ============================================================
-
-def process_chunks_file(path: Path, llm) -> None:
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-
-    chunks = data.get("chunks", [])
-    if not isinstance(chunks, list):
-        print(f"Invalid format (no chunks list): {path}")
-        return
-
-    changed = False
-    debug_rows = []
-
-    for idx, chunk in enumerate(chunks):
-        if not isinstance(chunk, dict):
-            continue
-
-        existing = chunk.get("contextKeywords")
-        if existing:
-            debug_rows.append(
+    if probe_downloads:
+        probes = []
+        for a in chunk_candidates:
+            key = _attachment_key(a)
+            data = prefetched.get(key)
+            probes.append(
                 {
-                    "chunk_index": idx,
-                    "status": "skipped_existing",
-                    "content_preview": str(chunk.get("content", ""))[:200],
-                    "contextKeywords": existing,
+                    "id": key,
+                    "filename": a.get("filename", ""),
+                    "download_ok": data is not None,
+                    "bytes": len(data) if data else 0,
+                    **({"error": "not prefetched"} if data is None else {}),
                 }
             )
-            continue
+        report["download_probe"] = probes
 
-        content = chunk.get("content", "") or ""
-        if not content.strip():
-            chunk["contextKeywords"] = []
-            debug_rows.append(
-                {
-                    "chunk_index": idx,
-                    "status": "empty_content",
-                    "content_preview": "",
-                    "contextKeywords": [],
-                }
-            )
-            changed = True
-            continue
+    if out_dir:
+        ticket_out = out_dir / ticket_id
+        ticket_out.mkdir(parents=True, exist_ok=True)
+        with open(ticket_out / "triage_debug.json", "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False, default=str)
 
-        kws = extract_keywords(content, llm)
-        chunk["contextKeywords"] = kws
-        changed = True
-
-        debug_rows.append(
-            {
-                "chunk_index": idx,
-                "status": "updated",
-                "content_preview": content[:200],
-                "contextKeywords": kws,
-            }
-        )
-
-    if changed:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        print(f"Updated: {path}")
-    else:
-        print(f"No changes: {path}")
-
-    # Save per-file debug report
-    debug_path = path.with_name(path.stem + "_keywords_debug.json")
-    with open(debug_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "source_file": str(path),
-                "chunk_count": len(chunks),
-                "rows": debug_rows,
-            },
-            f,
-            indent=2,
-            ensure_ascii=False,
-        )
-    print(f"Debug saved: {debug_path}")
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main() -> None:
-    llm = IDPChatOpenAI(model=MODEL)
-
-    if not CHUNKS_DIR.exists():
-        print(f"Chunks directory does not exist: {CHUNKS_DIR}")
-        return
-
-    for ticket_dir in CHUNKS_DIR.iterdir():
-        if not ticket_dir.is_dir():
-            continue
-
-        chunks_path = ticket_dir / CHUNKS_FILENAME
-        if chunks_path.exists():
-            process_chunks_file(chunks_path, llm)
-        else:
-            print(f"Missing file: {chunks_path}")
-
-
-if __name__ == "__main__":
-    main()
+    return report

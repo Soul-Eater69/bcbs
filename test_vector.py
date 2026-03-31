@@ -1,66 +1,41 @@
-from langchain_core.documents import Document
-from extract_mentioned_docs import extract_mentioned_docs, SearchMode
-
-LLM_RESPONSE = """
-Claim Management is the capability for receiving and resolving payment requests 
-for products and services rendered.
-
-Claim Management handles the intake and resolution of payment requests to settle 
-financial liability for services provided.
-
-- Claim Orchestration, which coordinates activities and documents required to 
-  process intake, management, and routing of individual payment requests.
-- Claim Adjudication, which manages resolution of financial liability and payment 
-  settlement according to eligible member benefits.
-- Claim Support, which assists with communications, inquiries, appeals, and 
-  recoveries related to claims.
-- Claims Analytics and Reporting, which manages metrics, standards, reporting, 
-  and analysis of claims information and processing.
-- Payment Integrity Management, which manages measures to guarantee accurate 
-  payments and minimize payment errors, fraud, waste, and abuse.
-- Claim Acquisition Management, which manages claim receipt, imaging, translation, 
-  and supporting documentation to adjudicate a claim.
-- Claim Data Management, which stores, maintains, and publishes claim data 
-  throughout the claim lifecycle.
-- Claim Communication Management, which designs and shares information about a claim.
-- Claim Edit Management, which reviews and audits claims to ensure accurate billing 
-  and coding.
-- Claim Inventory Management, which manages and tracks claim records through all 
-  stages to resolve issues and finalize claims timely.
-- Claim Appeal Management, which manages challenges to reimbursement decisions 
-  related to a claim.
-- Blue Exchange supports Claim Acquisition Management, Claim Communication 
-  Management, and Claim Data Management.
-- HIPAA 27x Availity supports Claim Acquisition Management, Claim Communication 
-  Management, and Claim Data Management.
-- Integrated Channels Platform supports Claim Acquisition Management, Claim 
-  Communication Management, and Claim Data Management.
-- NEBO and Real Time Verification Tool support Claim Acquisition Management, 
-  Claim Communication Management, and Claim Data Management.
-"""
+def _chunk_score(chunk: dict) -> float:
+    return float(chunk.get("_score") or chunk.get("best_score") or chunk.get("score") or 0.0)
 
 
-def test_vector_search():
-    docs = extract_mentioned_docs(LLM_RESPONSE, mode=SearchMode.VECTOR)
-
-    assert len(docs) > 0 and isinstance(docs[0], Document)
-
-    for doc in docs:
-        print(doc.metadata)
-        print(doc.metadata.get("entity_name"), "|", doc.page_content[:100])
+def _chunk_ticket_id(chunk: dict) -> str:
+    return str(chunk.get("sourceId") or chunk.get("ticket_id") or chunk.get("source_id") or "").strip()
 
 
-from impact_analysis.vector_client import IDPAzureSearchRetriever
-from langchain_core.documents import Document
+def _chunk_text(chunk: dict) -> str:
+    return str(chunk.get("content") or chunk.get("text") or chunk.get("snippet") or "").strip()
 
-retriever = IDPAzureSearchRetriever(
-    index_name="idp_kg_data",
-    search_type="semantic",
-    semantic_configuration_name="default",
-)
 
-docs = retriever.invoke(input="Claim Management")
+def _chunk_provenance_text(chunk: dict) -> str:
+    prov = chunk.get("chunkProvenance") or {}
+    if isinstance(prov, str):
+        try:
+            prov = json.loads(prov)
+        except Exception:
+            prov = {}
 
-assert len(docs) > 0 and isinstance(docs[0], Document)
-print(f"SUCCESS: got {len(docs)} docs")
-print(docs[0].metadata)
+    if not isinstance(prov, dict):
+        prov = {}
+
+    page_range = prov.get("pageRange") or []
+    slide_range = prov.get("slideRange") or []
+    source_type = str(prov.get("sourceType") or "").strip()
+
+    if isinstance(page_range, list) and page_range:
+        if len(page_range) == 1:
+            where = f"page-{page_range[0]}"
+        else:
+            where = f"pages-{page_range[0]}-{page_range[-1]}"
+    elif isinstance(slide_range, list) and slide_range:
+        if len(slide_range) == 1:
+            where = f"slide-{slide_range[0]}"
+        else:
+            where = f"slides-{slide_range[0]}-{slide_range[-1]}"
+    else:
+        where = ""
+
+    return ":".join([p for p in [source_type, where] if p])

@@ -1,32 +1,12 @@
-row_id                               String   key
-value_stream_name                    String   searchable, filterable, sortable, facetable, retrievable
-value_stream_stage_id                String   filterable, retrievable
-value_stream_stage_sequence          Int32    filterable, sortable, retrievable
-value_stream_stage_name              String   searchable, filterable, sortable, facetable, retrievable
-value_stream_stage_description       String   searchable, retrievable
-value_stream_stage_display_name      String   searchable, retrievable
-value_stream_stage_entrance_criteria String   searchable, retrievable
-value_stream_stage_exit_criteria     String   searchable, retrievable
-value_stream_trigger                 String   searchable, filterable, facetable, retrievable
-value_stream_stakeholders            String   searchable, retrievable
-value_stream_stage_value_items       String   searchable, retrievable
-value_stream_category                String   searchable, filterable, sortable, facetable, retrievable
-value_stream_active                  Boolean  filterable, facetable, retrievable
-content                              String   searchable, retrievable
-content_vector                       Collection(Edm.Single)   searchable (vector), dimensions=1536, retrievable=false
 
+Also change `ValueStreamService.get_ppt_text(...)` so it cleans after extraction instead of returning raw MarkItDown text:
 
+```python
+from core.text import clean_ppt_text
 
-Value Stream: Acquire Asset.
-Stage ID: VSS00074680.
-Stage Sequence: 1.
-Stage Name: Request Asset.
-Stage Description: The act of submitting a request for a new asset.
-Display Name: Request Asset [VSS00074680].
-Entrance Criteria: Asset order initiated.
-Exit Criteria: Asset order acknowledged.
-Trigger: Asset Requester.
-Stakeholders: Supplier; Procurement; Asset Requestor; Business Manager; Finance Ops.
-Stage Value Items: Asset order requested.
-Category: Finance.
-Active: Yes.
+text = self._md.convert(str(path)).text_content or ""
+text = clean_ppt_text(text)
+if not text.strip():
+    raise ValueError(f"No text could be extracted from {path}.")
+safe_text = truncate_to_token_limit(text)
+return safe_text

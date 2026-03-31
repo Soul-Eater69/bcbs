@@ -1,133 +1,216 @@
-import asyncio
+"""
+Upload local per-ticket chunk files to Azure AI Search.
+
+Reads only individual files:
+  <base_dir>/<ticket_id>/07_chunks.json
+
+It does NOT read <base_dir>/_all_chunks.json.
+
+Behavior:
+- keeps original chunk hash id as Azure Search document key
+- does NOT add extra fields not present in the index schema
+- normalizes timezone offsets like -0500 -> -05:00
+- fills missing createdDate with updatedDate, else current UTC time
+- fills missing updatedDate with current UTC time
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
 import json
-import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from jira_ingestion.config import JiraIngestionConfig
-from jira_ingestion.clients.jira.value_stream_client import JiraValueStreamClient
-from jira_ingestion.ingestion.indexing import create_indexes
-from jira_ingestion.ingestion.pipeline import ingest_ticket
-from jira_ingestion.ingestion.storage import DocumentStore
+from azure.identity import ClientSecretCredential
+from azure.search.documents import SearchClient
 
-
-# ----------------------------
-# Config
-# ----------------------------
-JIRA_BASE_URL = os.getenv("JIRA_BASE_URL", "https://your-company.atlassian.net")
-JIRA_TOKEN = os.getenv("JIRA_TOKEN", "")
-TICKET_KEY = os.getenv("TICKET_KEY", "IDEA-1234")
-
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "output/test_ingest")
-STORAGE_FMT = os.getenv("STORAGE_FMT", "json")  # json | jsonl | parquet
+from src import config
 
 
-async def main() -> None:
-    if not JIRA_TOKEN:
-        raise RuntimeError("Set JIRA_TOKEN in your environment before running this script.")
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    # Pipeline runtime config
-    config = JiraIngestionConfig(
-        max_slides=40,
-        max_supplementary=2,
-        ocr_enabled=False,
-        section_min_slides=8,
-        entity_dict_path="data/entity_dicts",
+
+def _normalize_datetime_offset(value: Any) -> Any:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+
+    value = value.strip()
+    if not value:
+        return None
+
+    # Convert timezone offset from -0600 -> -06:00
+    match = re.match(r"^(.*)([+-]\d{2})(\d{2})$", value)
+    if match:
+        return f"{match.group(1)}{match.group(2)}:{match.group(3)}"
+
+    return value
+
+
+def _resolve_dates(created: Any, updated: Any) -> tuple[str, str]:
+    created_norm = _normalize_datetime_offset(created)
+    updated_norm = _normalize_datetime_offset(updated)
+
+    now_iso = _utc_now_iso()
+
+    if updated_norm is None:
+        updated_norm = now_iso
+    if created_norm is None:
+        created_norm = updated_norm or now_iso
+
+    return str(created_norm), str(updated_norm)
+
+
+def _load_ticket_chunk_files(base_dir: Path) -> list[Path]:
+    pattern = str(base_dir / "*" / "07_chunks.json")
+    return [Path(p) for p in sorted(glob.glob(pattern))]
+
+
+def _load_documents(files: list[Path]) -> tuple[list[dict], dict[str, int]]:
+    docs: list[dict] = []
+    per_ticket_counts: dict[str, int] = {}
+
+    for file_path in files:
+        ticket_id = file_path.parent.name
+        payload = json.loads(file_path.read_text(encoding="utf-8"))
+        chunks = payload.get("chunks", [])
+        per_ticket_counts[ticket_id] = len(chunks)
+
+        for doc in chunks:
+            item = dict(doc)
+
+            created_date, updated_date = _resolve_dates(
+                item.get("createdDate"),
+                item.get("updatedDate"),
+            )
+            item["createdDate"] = created_date
+            item["updatedDate"] = updated_date
+
+            provenance = dict(item.get("chunkProvenance") or {})
+            if provenance.get("pageRange") is None:
+                provenance["pageRange"] = []
+            if provenance.get("slideRange") is None:
+                provenance["slideRange"] = []
+            item["chunkProvenance"] = provenance
+
+            # Keep original pipeline hash id as the Azure Search key
+            original_id = str(item.get("id") or "").strip()
+            if not original_id:
+                raise ValueError(f"Missing id in chunk from {file_path}")
+
+            item["id"] = original_id
+            item["@search.action"] = "mergeOrUpload"
+
+            docs.append(item)
+
+    return docs, per_ticket_counts
+
+
+def _get_client(index_name: str) -> SearchClient:
+    credential = ClientSecretCredential(
+        tenant_id=config.AZURE_TENANT_ID,
+        client_id=config.AZURE_CLIENT_ID,
+        client_secret=config.AZURE_CLIENT_SECRET,
+    )
+    return SearchClient(
+        endpoint=config.AZURE_SEARCH_ENDPOINT,
+        index_name=index_name,
+        credential=credential,
     )
 
-    # Indexes
-    # For local testing, "memory" is the safest backend.
-    coarse_index, fine_index, metadata_index, supervision_store = create_indexes(
-        backend="memory"
+
+def _clear_existing_documents(client: SearchClient) -> int:
+    to_delete = []
+    for row in client.search(search_text="*", select=["id"], top=1000):
+        doc_id = row.get("id") if isinstance(row, dict) else row["id"]
+        if doc_id:
+            to_delete.append({"id": doc_id, "@search.action": "delete"})
+
+    if not to_delete:
+        return 0
+
+    client.delete_documents(documents=to_delete)
+    return len(to_delete)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Upload local per-ticket chunk files to Azure AI Search")
+    parser.add_argument(
+        "--base-dir",
+        default="ticket_chunks",
+        help="Folder containing per-ticket 07_chunks.json files",
     )
+    parser.add_argument(
+        "--index",
+        default="idmt_data",
+        help="Target Azure Search index",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="Upload batch size",
+    )
+    parser.add_argument(
+        "--clear-existing",
+        action="store_true",
+        help="Delete existing docs in target index before upload",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Read/transform docs only, do not upload",
+    )
+    args = parser.parse_args()
 
-    # Jira client
-    async with JiraValueStreamClient(
-        base_url=JIRA_BASE_URL,
-        token=JIRA_TOKEN,
-        verify_ssl=True,
-    ) as jira_client:
-        # Full pipeline ingest
-        document = await ingest_ticket(
-            ticket_key=TICKET_KEY,
-            jira_client=jira_client,
-            coarse_index=coarse_index,
-            fine_index=fine_index,
-            metadata_index=metadata_index,
-            supervision_store=supervision_store,
-            trigger="backfill",          # or "webhook"
-            llm_client=None,             # plug in later if you want summaries from an LLM
-            embedding_client=None,       # plug in later if you want real embeddings
-            dict_path=config.entity_dict_path,
-            force_reprocess=True,        # good for testing
-            storage_dir=OUTPUT_DIR,
-            storage_fmt=STORAGE_FMT,
-            config=config,
-        )
+    files = _load_ticket_chunk_files(Path(args.base_dir))
+    if not files:
+        raise SystemExit(f"No per-ticket chunk files found under: {args.base_dir}")
 
-    # ----------------------------
-    # Inspect outputs
-    # ----------------------------
-    print("\n=== INGEST COMPLETE ===")
-    print("Ticket:", document["ticket_key"])
-    print("Schema:", document["schema_version"])
-    print("Quality tier:", document["observed"]["quality_tier"])
-    print("Content source:", document["observed"]["content_source"])
-    print("Chunk count:", document["observed"]["stats"]["chunk_count"])
-    print("Section count:", document["observed"]["stats"]["section_count"])
-    print("Trainable for VS:", document["supervision"]["trainability"]["is_trainable_for_vs"])
+    docs, per_ticket_counts = _load_documents(files)
+    unique_ids = {d["id"] for d in docs}
 
-    print("\n=== TRIAGE ===")
-    triage = document["observed"]["triage"]
-    print("Primary attachment:", triage["primary_attachment"])
-    print("Supplementary attachments:", triage["supplementary_attachments"])
-    print("Attachment count total:", triage["attachment_count_total"])
+    print(f"ticket_files={len(files)}")
+    for ticket_id in sorted(per_ticket_counts):
+        print(f"{ticket_id}: chunks={per_ticket_counts[ticket_id]}")
+    print(f"total_docs={len(docs)}")
+    print(f"unique_ids={len(unique_ids)}")
 
-    print("\n=== LABELS ===")
-    print("VS labels:", document["supervision"]["vs_labels"])
+    same_created_updated = sum(
+        1 for d in docs if d.get("createdDate") == d.get("updatedDate")
+    )
+    print(f"created_equals_updated={same_created_updated}")
 
-    print("\n=== ENTITY COUNTS ===")
-    entity_mentions = document["observed"]["entity_mentions"]
-    for entity_type, mentions in entity_mentions.items():
-        print(f"{entity_type}: {len(mentions)}")
+    if args.dry_run:
+        print("dry_run=True (no Azure writes)")
+        return
 
-    print("\n=== INDEX CHECKS ===")
-    coarse_doc = coarse_index.get(TICKET_KEY)
-    metadata_doc = metadata_index.get(TICKET_KEY)
-    supervision_doc = supervision_store.get(TICKET_KEY)
+    client = _get_client(args.index)
 
-    print("Coarse index present:", coarse_doc is not None)
-    print("Metadata index present:", metadata_doc is not None)
-    print("Supervision doc present:", supervision_doc is not None)
+    deleted = 0
+    if args.clear_existing:
+        deleted = _clear_existing_documents(client)
+        print(f"deleted_existing={deleted}")
 
-    # Show first few fine chunks if your backend exposes internal store shape
-    # For InMemoryVectorIndex only:
-    if hasattr(fine_index, "_store"):
-        fine_keys = list(fine_index._store.keys())[:5]
-        print("Sample fine chunk ids:", fine_keys)
+    uploaded_ok = 0
+    failed = 0
 
-    # Reload saved artifact from disk
-    store = DocumentStore(output_dir=OUTPUT_DIR)
-    reloaded = store.load(TICKET_KEY, with_embeddings=True)
+    for start in range(0, len(docs), args.batch_size):
+        batch = docs[start : start + args.batch_size]
+        result = client.upload_documents(documents=batch)
+        uploaded_ok += sum(1 for r in result if getattr(r, "succeeded", False))
+        failed += sum(1 for r in result if not getattr(r, "succeeded", False))
 
-    print("\n=== STORED FILES ===")
-    print("Output dir:", OUTPUT_DIR)
-    print("Store summary:", json.dumps(store.summary(), indent=2))
-
-    if reloaded:
-        summary_path = Path(OUTPUT_DIR) / f"{TICKET_KEY}.json"
-        print("Reloaded from:", summary_path)
-        print("Reloaded quality tier:", reloaded["observed"]["quality_tier"])
-
-    # Optional: dump a tiny preview
-    preview = {
-        "ticket_key": document["ticket_key"],
-        "summary_text": document["observed"]["summary_text"][:1000],
-        "metadata_text": document["observed"]["metadata_text"][:1000],
-        "vs_labels": document["supervision"]["vs_labels"],
-    }
-    print("\n=== PREVIEW ===")
-    print(json.dumps(preview, indent=2, ensure_ascii=False))
+    count_now = client.get_document_count()
+    print(f"uploaded_ok={uploaded_ok}")
+    print(f"failed={failed}")
+    print(f"index_count_now={count_now}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
