@@ -1,233 +1,668 @@
-cool ignore that approach for now ,i have shared three pipeline ingest and historic summary file which im working right now, u see i gave inges for reference only , curreent ingestion of the jira card data, and pipeline has the relevant metrhods and its the core, now i want t ouse the logic if its good and efficient, but its tightly coupled in the pipeline, can we fix that 
+# Architecture: Summary-First Retrieval for Idea Cards
 
-I’m looking through the three files to separate “reusable domain logic” from “orchestration glue,” and I already see one concrete issue: one file still has merge-conflict markers, so that file needs cleanup before it can become a stable shared module.
+## Goal
 
-Thought for 1m 11s
+Improve value-stream inference for a new Jira idea card / PPT by moving away from noisy raw historical chunk retrieval and toward a **summary-first retrieval architecture**.
 
-Yes — the logic is reusable. The problem is not the logic itself, it is the layering.
+The main problem with the earlier approach is that semantic search over raw historical chunks tends to match broad enterprise-healthcare language across many tickets. That leads to:
 
-Right now the current code mixes too many responsibilities in one place:
+- too many historical ticket hits,
+- many semantically similar but weakly relevant chunks,
+- large LLM context windows,
+- poor evidence density,
+- unstable value-stream selection.
 
-your summary/index file both calls ingestion and builds/searches the FAISS store. get_meaningful_text_from_ticket_id() creates the Jira client, LLM, embedding client, config, calls ingest_ticket, writes a debug file, and returns observed.retrieval_text; then the same file also owns make_summary_document, build_langchain_faiss_summary_index, and search_langchain_faiss_summary_index.
-the pipeline file mixes adapter construction, config building, record projection, and batch runtime/orchestration in one module. The OpenAI-compatible wrappers live beside config helpers, record builders, and the async batch runner.
-one of the uploaded pipeline variants still has unresolved Git merge markers, so that version should not be used as the base for refactoring.
+This design introduces:
 
-So yes, you can fix this cleanly.
+1. **New-card semantic summary generation**
+2. **Historical ticket semantic summaries**
+3. **A local LangChain + FAISS summary index**
+4. **Late-stage raw chunk lookup only for shortlisted tickets**
+5. **A cleaner separation between ingestion, projection, indexing, and orchestration**
 
-What to keep vs what to move
+---
 
-Keep these as reusable domain/pipeline functions:
+## High-Level Architecture
 
-build_chunk_record
-build_valuestream_record
-build_config idea
-the call to ingest_ticket
-the summary FAISS helpers
+```text
+New Jira Idea Card / PPT
+        |
+        v
+clean + normalize PPT text
+        |
+        v
+generate semantic summary for new card
+        |
+        v
+build retrieval text from semantic summary
+        |
+        v
+search historical ticket summary FAISS index
+        |
+        v
+retrieve top analogous historical tickets
+        |
+        +------------------------------+
+        |                              |
+        v                              v
+retrieve KG / value-stream candidates  optional raw chunk lookup for top tickets only
+        |                              |
+        +--------------+---------------+
+                       |
+                       v
+compact evidence package for LLM
+                       |
+                       v
+final value-stream selection
+```
 
-Those are useful. The issue is that they are not isolated. process_ticket() currently does ingestion, projection, logging, and file persistence all together.
+---
 
-Best refactor shape
+## Why This Approach
 
-Split into 4 layers.
+### Problem with raw chunk retrieval
 
-1) services/ingestion_service.py
+Earlier retrieval was based on historical raw ticket chunks. That causes weak discrimination because many tickets share generic language such as:
 
-This should be the only place that knows how to call ingest_ticket.
+- member
+- provider
+- product
+- engagement
+- workflow
+- digital
+- solution
+- growth
 
-It should do one job:
+The vector retriever therefore tends to pull:
 
-doc = await ingest_one_ticket(ticket_id, deps, cfg)
+- many tickets,
+- many chunks from the same broad domain,
+- weakly differentiated evidence.
 
-Return the raw ingestion result, nothing else.
+### Why summaries help
 
-2) projections/jira_records.py
+A semantic summary compresses raw ticket/PPT content into a clearer business representation:
 
-Move pure transformation logic here:
+- what the initiative is,
+- which actors are involved,
+- what functions are directly affected,
+- what downstream processes are implied,
+- what the business goal is.
 
-build_chunk_record
-build_valuestream_record
-extract_retrieval_text(doc)
-later: build_ticket_summary_input(doc)
+This produces better retrieval because the embedding reflects **intent and business semantics**, not just shared jargon.
 
-These are pure functions from doc -> shape.
+---
 
-3) factories/runtime.py
+## Core Design Principles
 
-Move environment/runtime creation here:
+### 1. Summaries for retrieval
+Use semantic summaries as the primary representation for retrieving analog historical tickets.
 
-build_config()
-create_memory_indexes()
-build_llm_client()
-build_embedding_client()
+### 2. Raw chunks for verification
+Keep raw chunks, but only use them later:
 
-Right now those helpers are mixed into the batch runner.
+- for evidence display,
+- for traceability,
+- for verifying borderline candidates,
+- for final compact grounding.
 
-4) jobs/batch_ingest.py
+### 3. Small, dense prompts
+The LLM should not receive 15 tickets and 32 chunks. It should receive:
 
-This becomes thin orchestration only:
+- the new card semantic summary,
+- shortlisted value-stream candidates,
+- top historical analog summaries,
+- a few carefully selected raw snippets only if needed.
 
-loop tickets
-call service
-project outputs
-persist files
-log
+### 4. Decouple pipeline layers
+Ingestion, transformation, indexing, and batch orchestration should be separate.
 
-That means process_ticket() gets much smaller.
+---
 
-What is tightly coupled today
+## End-to-End Flow
 
-This is the exact coupling problem:
+## Step 1: New Card Summary Generation
 
-In your summary file
+Input:
+- cleaned PPT / Jira card text
 
-get_meaningful_text_from_ticket_id() hardcodes:
+Output:
+- a structured semantic summary JSON
 
-how to create Jira client
-which model to use
-which embedding client to use
-which config flags to use
-that a debug file should be written
-that only observed.retrieval_text should be returned
+This summary should capture:
 
-So you cannot easily reuse it for:
+- short summary
+- business goal
+- actors
+- direct functions
+- implied functions
+- change types
+- domain tags
+- evidence sentences
 
-batch mode
-tests
-alternate config
-summary generation
-local-only runs without rewriting the function
-In your pipeline file
+### Example
 
-process_ticket() hardcodes:
+```json
+{
+  "doc_id": "NEW_CARD__summary",
+  "short_summary": "Launch of a new employer/member health advocacy offering focused on navigation, engagement, and care coordination.",
+  "business_goal": "launch a new healthcare offering",
+  "actors": ["member", "provider", "employer"],
+  "direct_functions": [
+    "product offering",
+    "engagement",
+    "care coordination"
+  ],
+  "implied_functions": [
+    "provider setup",
+    "pricing",
+    "billing",
+    "IT enablement"
+  ],
+  "change_types": [
+    "new product launch",
+    "operational rollout"
+  ],
+  "domain_tags": [
+    "health advocacy",
+    "navigation",
+    "member experience"
+  ],
+  "evidence_sentences": [
+    "launch a new employer/member health advocacy solution",
+    "improve navigation and care coordination"
+  ]
+}
+```
 
-local file paths
-persistence names
-projection logic
-logging behavior
-ingestion call
-batch/runtime dependencies passed separately
+---
 
-So it is reusable only if you want that exact workflow.
+## Step 2: Build Retrieval Text
 
-What I would change first
-Step 1: introduce one dependency container
-from dataclasses import dataclass
-from typing import Any
+The retriever often expects a single string query, not structured JSON.
 
-@dataclass
-class IngestionDeps:
-    jira_client: Any
-    llm_client: Any | None
-    embedding_client: Any | None
-    coarse_index: Any
-    fine_index: Any
-    metadata_index: Any
-    supervision_store: Any
+So we convert the summary into a packed retrieval string.
 
-Now ingest_ticket dependencies travel together.
+### Example retrieval text
 
-Step 2: make one raw ingestion function
-async def ingest_one_ticket(
-    ticket_id: str,
-    deps: IngestionDeps,
-    cfg: JiraIngestionConfig,
-    storage_dir: str | None = None,
-) -> dict:
-    return await ingest_ticket(
-        ticket_key=ticket_id,
-        jira_client=deps.jira_client,
-        coarse_index=deps.coarse_index,
-        fine_index=deps.fine_index,
-        metadata_index=deps.metadata_index,
-        supervision_store=deps.supervision_store,
-        config=cfg,
-        llm_client=deps.llm_client,
-        embedding_client=deps.embedding_client,
-        storage_dir=storage_dir,
-    )
+```text
+title: Employer/member advocacy launch
+Launch of a new employer/member health advocacy offering focused on navigation, engagement, and care coordination.
+business goal: launch a new healthcare offering
+actors: member, provider, employer
+direct functions: product offering, engagement, care coordination
+implied functions: provider setup, pricing, billing, IT enablement
+change types: new product launch, operational rollout
+domain tags: health advocacy, navigation, member experience
+evidence: launch a new employer/member health advocacy solution | improve navigation and care coordination
+```
 
-Now the pipeline call is decoupled from file writing and downstream projection.
+This is the text embedded and used for similarity search.
 
-Step 3: make pure projection functions
-def project_ticket_outputs(ticket_id: str, result: dict) -> tuple[list[dict], dict]:
-    obs = result.get("observed", {})
-    meta = obs.get("metadata", {})
-    chunks = [build_chunk_record(c, ticket_id, obs, meta) for c in obs.get("chunks", [])]
-    vs_map = build_valuestream_record(ticket_id, result)
-    return chunks, vs_map
+---
 
+## Step 3: Historical Ticket Summary Generation
 
-def extract_retrieval_text(result: dict) -> str:
-    return str(result.get("observed", {}).get("retrieval_text") or "")
+For each historical ticket, create a semantic summary using ticket-level information rather than raw chunk-level retrieval.
 
-Now your summary-index flow can reuse the same ingestion result without re-running logic.
+Input sources per ticket may include:
 
-Step 4: make persistence separate
-def persist_ticket_outputs(ticket_dir: Path, ticket_id: str, chunks: list[dict], vs_map: dict) -> None:
-    dump_json(ticket_dir / "07_chunks.json", {
-        "ticket_id": ticket_id,
-        "mapped_value_stream_ids": vs_map.get("valueStreamIds", []),
-        "mapped_value_stream_names": vs_map.get("valueStreamNames", []),
-        "chunk_count": len(chunks),
-        "chunks": chunks,
-    })
-    dump_json(ticket_dir / "08_valuestream_map.json", vs_map)
+- title / summary
+- description
+- comments
+- attachment text
+- existing generated summary
+- known mapped value streams
 
-Now batch runtime can call persistence, but summary generation can skip it.
+### Historical summary example
 
-Clean target architecture
+```json
+{
+  "doc_id": "IDMT-19761__summary",
+  "ticket_id": "IDMT-19761",
+  "title": "Employer/member advocacy launch",
+  "short_summary": "Launch of a new member advocacy and navigation offering requiring provider coordination and operational support.",
+  "business_goal": "launch a member-facing healthcare product",
+  "actors": ["member", "provider"],
+  "direct_functions": [
+    "product offering",
+    "member engagement",
+    "provider coordination"
+  ],
+  "implied_functions": [
+    "pricing",
+    "enrollment",
+    "IT support"
+  ],
+  "change_types": ["new product launch"],
+  "domain_tags": ["advocacy", "navigation", "member experience"],
+  "evidence_sentences": [
+    "new advocacy solution for members",
+    "provider coordination required for rollout"
+  ],
+  "value_stream_labels": [
+    "Establish Product Offering",
+    "Perform Engagement"
+  ]
+}
+```
 
-I’d make it look like this:
+---
 
+## Step 4: Build Historical Summary FAISS Index
+
+### Storage choice
+For local experimentation, use:
+
+- **LangChain FAISS**
+- **1536-dimensional embeddings**
+- local persistence on disk
+
+### Why FAISS here
+
+- fast local semantic search
+- easy experimentation
+- avoids Azure indexing while architecture is still evolving
+- simple integration with LangChain retrievers later
+
+### Vector representation
+
+Each historical summary document is converted into retrieval text and embedded into a 1536-dimensional vector.
+
+### Index contents
+
+Each FAISS record corresponds to one historical ticket summary.
+
+The document content stored in the vector store is the `retrieval_text`.
+
+Metadata contains the structured fields for later inspection and downstream use.
+
+---
+
+## Proposed Summary Index Schema
+
+## A. Summary document schema
+
+```json
+{
+  "doc_id": "IDMT-19761__summary",
+  "ticket_id": "IDMT-19761",
+  "title": "Employer/member advocacy launch",
+  "short_summary": "Launch of a new member advocacy and navigation offering requiring provider coordination and operational support.",
+  "business_goal": "launch a member-facing healthcare product",
+  "actors": ["member", "provider"],
+  "direct_functions": [
+    "product offering",
+    "member engagement",
+    "provider coordination"
+  ],
+  "implied_functions": [
+    "pricing",
+    "enrollment",
+    "IT support"
+  ],
+  "change_types": ["new product launch"],
+  "domain_tags": ["advocacy", "navigation", "member experience"],
+  "evidence_sentences": [
+    "new advocacy solution for members",
+    "provider coordination required for rollout"
+  ],
+  "value_stream_labels": [
+    "Establish Product Offering",
+    "Perform Engagement"
+  ],
+  "retrieval_text": "...packed retrieval text..."
+}
+```
+
+## B. LangChain `Document`
+
+```python
+Document(
+    page_content=retrieval_text,
+    metadata={
+        "doc_id": "IDMT-19761__summary",
+        "ticket_id": "IDMT-19761",
+        "title": "Employer/member advocacy launch",
+        "short_summary": "...",
+        "business_goal": "...",
+        "actors": [...],
+        "direct_functions": [...],
+        "implied_functions": [...],
+        "change_types": [...],
+        "domain_tags": [...],
+        "evidence_sentences": [...],
+        "value_stream_labels": [...],
+        "doc_type": "ticket_summary",
+    }
+)
+```
+
+## C. Local persisted files
+
+Suggested local folder:
+
+```text
+local_ticket_summary_faiss/
+  index.faiss
+  index.pkl
+  summary_docs.json
+```
+
+Optional extra debug files:
+
+```text
+local_ticket_summary_faiss/
+  summary_docs.json
+  query_debug.json
+  top_hits.json
+```
+
+---
+
+## Query Path with the New Index
+
+### Query flow
+
+1. Clean the new PPT / card text
+2. Generate new-card semantic summary
+3. Build retrieval text from summary
+4. Query local FAISS summary index
+5. Retrieve top `k` historical tickets
+6. Use these as analog evidence
+7. Only then fetch raw chunks for a few top tickets if necessary
+
+### Result shape
+
+```json
+[
+  {
+    "rank": 1,
+    "score": 0.82,
+    "ticket_id": "IDMT-19761",
+    "title": "Employer/member advocacy launch",
+    "short_summary": "Launch of a new member advocacy and navigation offering...",
+    "actors": ["member", "provider"],
+    "direct_functions": [
+      "product offering",
+      "member engagement",
+      "provider coordination"
+    ],
+    "implied_functions": ["pricing", "enrollment", "IT support"],
+    "value_stream_labels": [
+      "Establish Product Offering",
+      "Perform Engagement"
+    ]
+  }
+]
+```
+
+---
+
+## How Raw Chunks Still Fit
+
+Raw chunks are still useful, but they move to a later stage.
+
+### Raw chunks should be used for:
+
+- evidence verification
+- UI citation / traceability
+- borderline candidate validation
+- final support snippet extraction
+
+### Raw chunks should not be used for:
+
+- first-pass analog retrieval
+- large prompt stuffing
+- broad history-first reasoning
+
+### Final pattern
+
+- summary index = primary analog retrieval
+- raw chunk data = optional evidence lookup for shortlisted tickets only
+
+---
+
+## Value-Stream Inference with This Design
+
+The final value-stream selection should not depend on historical chunk retrieval alone.
+
+Instead, combine:
+
+1. **new-card semantic summary**
+2. **candidate value-stream definitions / KG retrieval**
+3. **historical analog summaries from FAISS**
+4. **optional small raw evidence snippets**
+
+This gives the LLM a compact and higher-quality evidence package.
+
+### Final LLM input should look like:
+
+- new card semantic summary
+- shortlisted value-stream candidates
+- top historical analog ticket summaries
+- a few raw evidence lines only when needed
+
+Not:
+
+- full PPT text
+- 15 historical tickets
+- 32 raw chunks
+
+---
+
+## Recommended Pipeline Refactor
+
+The current implementation has useful logic, but it is tightly coupled.
+
+### Current coupling issues
+
+The current summary/index file does all of the following in one place:
+
+- creates Jira client
+- creates LLM client
+- creates embedding client
+- builds config
+- calls ingestion
+- writes debug JSON
+- returns retrieval text
+- builds and queries FAISS
+
+The pipeline file also mixes:
+
+- runtime setup
+- config construction
+- record transformation
+- output persistence
+- async batch orchestration
+
+This makes reuse hard.
+
+---
+
+## Proposed Layered Refactor
+
+## 1. `runtime/` layer
+Responsible for environment and client creation.
+
+Examples:
+
+- `build_config()`
+- `build_llm_client()`
+- `build_embedding_client()`
+- `create_memory_indexes()`
+
+## 2. `services/ingestion_service.py`
+Responsible only for calling ingestion.
+
+Example responsibility:
+
+```python
+result = await ingest_one_ticket(ticket_id, deps, cfg)
+```
+
+## 3. `projections/` layer
+Pure transformation logic.
+
+Examples:
+
+- `build_chunk_record(result)`
+- `build_valuestream_record(result)`
+- `extract_retrieval_text(result)`
+- `build_ticket_summary_input(result)`
+
+## 4. `indexes/summary_faiss.py`
+Responsible only for:
+
+- converting summary docs to LangChain Documents
+- building the FAISS store
+- saving/loading the FAISS store
+- searching the FAISS store
+
+## 5. `jobs/batch_ingest.py`
+Thin orchestration only.
+
+Responsibilities:
+
+- iterate tickets
+- call ingestion service
+- project outputs
+- persist outputs
+- log progress
+
+---
+
+## Proposed Module Layout
+
+```text
 jira_ingestion/
+  runtime/
+    factories.py
+    config_builder.py
   services/
     ingestion_service.py
   projections/
     chunk_projection.py
     valuestream_projection.py
     summary_projection.py
-  runtime/
-    factories.py
-    config_builder.py
-  jobs/
-    batch_ingest.py
   indexes/
     summary_faiss.py
-summary_faiss.py
+  jobs/
+    batch_ingest.py
+```
 
-This should keep only:
+---
 
-make_summary_document
-build_langchain_faiss_summary_index
-load_langchain_faiss_summary_index
-search_langchain_faiss_summary_index
+## Summary Projection Design
 
-Those functions are already nicely separable.
+A new `summary_projection.py` should own the bridge from raw ingestion result to summary indexing.
 
-summary_projection.py
+### Responsibilities
 
-New file:
+- extract ticket-level source text from ingestion result
+- generate semantic summary
+- normalize summary JSON
+- build retrieval text
+- return a summary doc ready for FAISS indexing
 
-build_historical_ticket_summary_input(result)
-extract_retrieval_text(result)
-later build_summary_doc_from_result(result, ticket_id, known_vs_map)
+### Example output
 
-That is the bridge between ingestion and FAISS.
+```json
+{
+  "doc_id": "IDMT-19761__summary",
+  "ticket_id": "IDMT-19761",
+  "title": "Employer/member advocacy launch",
+  "short_summary": "Launch of a new member advocacy and navigation offering requiring provider coordination and operational support.",
+  "business_goal": "launch a member-facing healthcare product",
+  "actors": ["member", "provider"],
+  "direct_functions": [
+    "product offering",
+    "member engagement",
+    "provider coordination"
+  ],
+  "implied_functions": [
+    "pricing",
+    "enrollment",
+    "IT support"
+  ],
+  "change_types": ["new product launch"],
+  "domain_tags": ["advocacy", "navigation", "member experience"],
+  "evidence_sentences": [
+    "new advocacy solution for members",
+    "provider coordination required for rollout"
+  ],
+  "value_stream_labels": [
+    "Establish Product Offering",
+    "Perform Engagement"
+  ],
+  "retrieval_text": "..."
+}
+```
 
-The important design rule
+---
 
-Do not let summary generation call ingest_ticket directly.
+## Suggested Implementation Sequence
 
-Right now your summary file does exactly that.
+### Phase 1: New card summary generation
+- generate semantic summary for new PPT / idea card
+- build retrieval text
+- test summary quality manually
 
-Instead do this:
+### Phase 2: Historical summary generation
+- create summary docs for historical tickets
+- persist summary docs locally
 
-ingestion service returns raw result
-projection layer derives:
-retrieval text
-chunk records
-value stream map
-summary input
-summary index layer only consumes projected summary docs
+### Phase 3: Local FAISS index
+- build LangChain FAISS index using summary docs
+- query it using the new-card summary retrieval text
+- inspect top hits
 
-That is the decoupling.
+### Phase 4: Raw evidence integration
+- for top 3–5 historical ticket hits only,
+- fetch 1–2 best raw chunks if needed
+
+### Phase 5: Final LLM evidence package
+- combine:
+  - new-card summary,
+  - value-stream candidates,
+  - top historical analog summaries,
+  - few raw snippets
+
+---
+
+## What Success Looks Like
+
+Compared to the previous raw-chunk retrieval approach, the improved system should show:
+
+- fewer historical ticket matches,
+- more believable top analog tickets,
+- smaller final LLM prompts,
+- higher evidence density,
+- better distinction between direct and indirect value-stream support.
+
+---
+
+## Final Recommendation
+
+### Keep
+- ingestion logic
+- chunk record builders
+- value-stream mapping logic
+- raw chunk persistence
+
+### Add
+- new-card semantic summary generation
+- historical ticket summary generation
+- LangChain FAISS summary index
+- summary projection layer
+
+### Change
+- stop using raw historical chunks as the primary analog retrieval surface
+- use raw chunks only after shortlisting historical tickets
+- decouple ingestion from indexing and orchestration
+
+---
+
+## One-Line Mental Model
+
+**Summaries retrieve. Raw chunks verify. The LLM adjudicates on compact evidence, not on a flood of historical text.**
