@@ -1,0 +1,21 @@
+Hi eldhose, for the value stream poc, i had tried three approaches 
+1) Plain vector search with the value streams and passing top k to the llm
+2) I have chunked the data of each ticket from jira, (descriptions, attachments, few comments) and used them to semantically match them
+3) Instead of storing raw chunks, i generated summaries and capabilities (keywords) from the previous jira tickets and stored them
+ and semantically searched them against the new idea card
+
+Problems,
+
+1) for the 1st approach, Was missing a lot but it had 70%+ recall in most cases
+2) for the 2nd, the problem was it retrieved all of the ticket chunks as the grammer used in these tickets are very similar so it almost selected everything.
+3) for the third, this seem to be the best till now, except it still misses a lot of the value streams, 
+
+the problem is we are able to capture all the semantically relevant value streams which seem relevant to the context and vs description, but these were not selected by bcbs as they did not prioritize it. 
+
+we are trying What value streams are semantically supported or plausibly implied by this card? and this is mostly we can capture using the sematic matching But ground truth is closer to:
+Which value streams does our organization actually assign for this initiative type under our taxonomy?
+And i am not sure how to capture this
+
+Then, for historic data im matching semantically and using deduplicated top k ranked value streams attached to them, but the ones they have in the GT are always ranked lower so we are unable to capture them
+
+And, then when i send more info in the prompt for lesser hallucination, the gateway times out 
