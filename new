@@ -1,0 +1,7 @@
+For any Jira ticket with usable content, the pipeline must:
+
+extract and normalize ticket text from Jira fields and attachments
+generate semantic value-stream candidates
+recover missing candidates from similar historical tickets
+use direct vs implied historical support during ranking
+return a final deduplicated list of value streams with confidence and rationale
