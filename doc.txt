@@ -1,12 +1,46 @@
-
-Also change `ValueStreamService.get_ppt_text(...)` so it cleans after extraction instead of returning raw MarkItDown text:
-
-```python
-from core.text import clean_ppt_text
-
-text = self._md.convert(str(path)).text_content or ""
-text = clean_ppt_text(text)
-if not text.strip():
-    raise ValueError(f"No text could be extracted from {path}.")
-safe_text = truncate_to_token_limit(text)
-return safe_text
+{
+  "workbench.iconTheme": "catppuccin-mocha",
+  "[typescript]": {
+    "editor.defaultFormatter": "rvest.vs-code-prettier-eslint",
+  },
+  "[typescriptreact]": {
+    "editor.defaultFormatter": "rvest.vs-code-prettier-eslint",
+  },
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "workbench.colorCustomizations": {
+    "terminal.background": "#00000000",
+  },
+  "javascript.updateImportsOnFileMove.enabled": "always",
+  "window.customTitleBarVisibility": "windowed",
+  "chat.mcp.discovery.enabled": {
+    "claude-desktop": true,
+    "windsurf": true,
+    "cursor-global": true,
+    "cursor-workspace": true
+  },
+  "chat.mcp.serverSampling": {},
+  "notebook.output.wordWrap": true,
+  "catppuccin.accentColor": "pink",
+  // make Mocha specifically very dark
+  // (this preserves other flavors!)
+  "catppuccin.colorOverrides": {
+    
+    "mocha": {
+      "base": "#0f0f17",
+      "mantle": "#0c0c13",
+      "crust": "#08080f",
+    },
+  },
+  // use your accent (pink) on the statusBar as well
+  "catppuccin.customUIColors": {
+    "mocha": {
+      "statusBar.foreground": "accent",
+    },
+  },
+  "workbench.colorTheme": "Catppuccin Mocha",
+  "prisma.hidePrisma6Prompts": true,
+  "claudeCode.preferredLocation": "panel",
+  "faahSoundError.enabled": true,
+  "claudeCode.selectedModel": "opus",
+}
