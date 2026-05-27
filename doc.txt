@@ -20,3 +20,20 @@ Out of scope:
 - Creating Jira tickets automatically
 - Updating Jira directly
 - UI changes
+
+
+Acceptance Criteria:
+
+1. The system should generate draft Theme content from the IDMT ticket.
+
+2. The generated content should include:
+   - Theme description
+   - Business Needs
+   - Title
+   - Value Stream Stage
+   - L2 Capability
+   - L3 Capability, when applicable
+
+3. The generated Theme description, Business Needs, and other fields should follow the formatting and structure used in previous Jira ticket templates.
+
+4. The generated content should be provided as draft recommendations for user review and manual entry into Jira.
