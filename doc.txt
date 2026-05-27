@@ -1,1 +1,22 @@
-Hi Nisha, just following up on my earlier note. No worries at all — I was only checking whether there might be any fresher openings coming up at Tiger soon. My brother is also exploring opportunities, so I thought I’d ask. Thanks again.
+As an IDP user,
+
+I want the Theme Generator DS/API to generate Theme draft content from an IDMT ticket,
+
+So that I can quickly review and manually enter the recommended Theme details in Jira.
+
+The API should generate:
+- Theme summary
+- Theme description
+- Business Needs
+- Business Value Stream
+- Value Stream Stage
+- L2 Capability
+- L3 Capability, when applicable
+- confidence/reasoning for each recommendation
+
+The generated values should come only from approved catalogs where applicable. If the API is not confident, it should leave the field blank instead of guessing.
+
+Out of scope:
+- Creating Jira tickets automatically
+- Updating Jira directly
+- UI changes
