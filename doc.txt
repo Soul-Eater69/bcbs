@@ -1,1 +1,2 @@
-uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode all50 --no-candidate-scores --sample 60 --count 10 --min-gt 1 --judge --repeat 3 --docx --out out/eval/all50_noscore.csv && uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode evidence --no-candidate-scores --sample 60 --count 10 --min-gt 1 --judge --repeat 3 --docx --out out/eval/evidence_noscore.csv
+uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode all50    --sample 60 --count 10 --min-gt 1 --judge --repeat 1 --out out/eval/all50.csv
+uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode evidence --sample 60 --count 10 --min-gt 1 --judge --repeat 1 --out out/eval/evidence.csv
