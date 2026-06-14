@@ -1,12 +1,8 @@
+# Test 1 — count following @ fixed 10
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode fixed --count 10 --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/count.csv
 
-# ── RUN 1: fully raw (index is already raw@7k) ──
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-retrieval --retrieval-budget 7000 --raw-text --query-budget 7000 --historic-repr raw --historic-budget 3000 --out out/eval/evidence.csv
+# Test 1 — count following @ gt+2
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/count.csv
 
-# ── RESTORE summary index (required before the summary-retrieval runs) ──
-uv run python scripts/upload_index.py out/idmt/index_historical.json
-
-# ── RUN 2: winner — summary retrieval + 24k(full) raw prompt + 6 summaries ──
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/evidence.csv
-
-# ── RUN 3: capped winner — summary retrieval + 7k raw prompt + 6 summaries ──
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --query-budget 7000 --historic-repr summary --out out/eval/evidence.csv
+# Test 2 — why TPs dropped @ count=gt
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --explain-drops --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/drops.csv
