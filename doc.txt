@@ -1,13 +1,11 @@
-uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode all50    --sample 60 --count 10 --min-gt 1 --judge --repeat 1 --out out/eval/all50.csv
-uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode evidence --sample 60 --count 10 --min-gt 1 --judge --repeat 1 --out out/eval/evidence.csv
-
-
-
-uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode evidence --no-candidate-scores --selection-prompt value_stream/selection_evidence_trust  --sample 60 --count 10 --min-gt 1 --judge --repeat 1 --out out/eval/history_trust.csv
-uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode evidence --no-candidate-scores --selection-prompt value_stream/selection_evidence_recall --sample 60 --count 10 --min-gt 1 --judge --repeat 1 --out out/eval/history_recall.csv
-
-uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode evidence --no-candidate-scores --selection-prompt value_stream/selection_evidence_recall --historic-k 8  --sample 60 --count 10 --min-gt 1 --judge --repeat 1 --out out/eval/recall_k8.csv
-uv run python -m scripts.eval_vs out/idmt/cosmos_idmt.json --mode evidence --no-candidate-scores --selection-prompt value_stream/selection_evidence_recall --historic-k 10 --sample 60 --count 10 --min-gt 1 --judge --repeat 1 --out out/eval/recall_k10.csv
-
-git checkout -- .gitignore "out/eval/all50.runs.json" "out/eval/evidence.runs.json"
-git pull
+# 1 — all summaries
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 --historic-repr summary --out out/eval/evidence.csv
+# 2 — raw + summary
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 --raw-text --historic-repr summary --out out/eval/evidence.csv
+# 3 — raw + raw-truncated (1500, 3000)
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 --raw-text --historic-repr raw --historic-budget 1500 --out out/eval/evidence.csv
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 --raw-text --historic-repr raw --historic-budget 3000 --out out/eval/evidence.csv
+# 4 — raw + descriptions
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 --raw-text --historic-repr description --out out/eval/evidence.csv
+# 5 — all 7k
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 --raw-text --query-budget 7000 --historic-repr raw --historic-budget 7000 --out out/eval/evidence.csv
