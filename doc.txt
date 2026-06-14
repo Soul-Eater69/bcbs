@@ -1,1 +1,1 @@
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --selection-prompt value_stream/selection_evidence_recall_v2 --out out/eval/ab.csv
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --score-select --out out/eval/scoresel.csv
