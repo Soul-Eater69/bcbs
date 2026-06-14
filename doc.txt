@@ -1,8 +1,1 @@
-# Test 1 — count following @ fixed 10
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode fixed --count 10 --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/count.csv
-
-# Test 1 — count following @ gt+2
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/count.csv
-
-# Test 2 — why TPs dropped @ count=gt
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --explain-drops --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/drops.csv
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --explain-drops --explain-swaps --ground-drops --score-margins --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/probe.csv
