@@ -19,6 +19,10 @@ Part 2 — cardinality / under-over (run AFTER we pick the winner)
 
 Replace <WINNER-FLAGS> with the winning run's representation flags (e.g. --raw-text --historic-repr summary). Note the different --out so these don't muddy the ladder's runs file:
 
+
+
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --raw-retrieval --retrieval-budget 7000 --raw-text --query-budget 7000 --historic-repr raw --historic-budget 7000 --out out/eval/raw7k.csv
+
 # winner at fixed 10 (lots of room → shows overfetch behavior)
 uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode fixed --count 10 --min-gt 3 --sample 100 <WINNER-FLAGS> --out out/eval/cardinality.csv
 # winner at gt_buffer 2 (realistic shortlist-then-trim)
