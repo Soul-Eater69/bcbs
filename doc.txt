@@ -1,1 +1,1 @@
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --score-select --out out/eval/scoresel.csv
+uv run python scripts/eval_stages.py out/idmt/cosmos_idmt.json --signals out/stage_eval/signals.json --mode both --input summary --min-vs 3 --min-stages 5 --concurrency 3
