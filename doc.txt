@@ -1,31 +1,12 @@
-Part 1 — representation ladder (run these now)
 
-# 1 — all summaries
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --historic-repr summary --out out/eval/evidence.csv
-# 2 — raw + summary
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --raw-text --historic-repr summary --out out/eval/evidence.csv
-# 3a — raw + raw-truncated (1500)
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --raw-text --historic-repr raw --historic-budget 1500 --out out/eval/evidence.csv
-# 3b — raw + raw-truncated (3000)
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --raw-text --historic-repr raw --historic-budget 3000 --out out/eval/evidence.csv
-# 4 — raw + descriptions
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --raw-text --historic-repr description --out out/eval/evidence.csv
-# 5 — all 7k
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --raw-text --query-budget 7000 --historic-repr raw --historic-budget 7000 --out out/eval/evidence.csv
+# ── RUN 1: fully raw (index is already raw@7k) ──
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-retrieval --retrieval-budget 7000 --raw-text --query-budget 7000 --historic-repr raw --historic-budget 3000 --out out/eval/evidence.csv
 
-→ all six append to out/eval/evidence.runs.json. Send me that file.
+# ── RESTORE summary index (required before the summary-retrieval runs) ──
+uv run python scripts/upload_index.py out/idmt/index_historical.json
 
-Part 2 — cardinality / under-over (run AFTER we pick the winner)
+# ── RUN 2: winner — summary retrieval + 24k(full) raw prompt + 6 summaries ──
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --historic-repr summary --out out/eval/evidence.csv
 
-Replace <WINNER-FLAGS> with the winning run's representation flags (e.g. --raw-text --historic-repr summary). Note the different --out so these don't muddy the ladder's runs file:
-
-
-
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --raw-retrieval --retrieval-budget 7000 --raw-text --query-budget 7000 --historic-repr raw --historic-budget 7000 --out out/eval/raw7k.csv
-
-# winner at fixed 10 (lots of room → shows overfetch behavior)
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode fixed --count 10 --min-gt 3 --sample 100 <WINNER-FLAGS> --out out/eval/cardinality.csv
-# winner at gt_buffer 2 (realistic shortlist-then-trim)
-uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt_buffer --buffer 2 --min-gt 3 --sample 100 <WINNER-FLAGS> --out out/eval/cardinality.csv
-
-→ these append to out/eval/cardinality.runs.json.
+# ── RUN 3: capped winner — summary retrieval + 7k raw prompt + 6 summaries ──
+uv run python scripts/eval_vs.py out/idmt/cosmos_idmt.json --mode evidence --judge --k 6 --count-mode gt --min-gt 3 --sample 100 --concurrency 3 --raw-text --query-budget 7000 --historic-repr summary --out out/eval/evidence.csv
