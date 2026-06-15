@@ -1,1 +1,1 @@
-uv run python scripts/eval_stages.py out/idmt/cosmos_idmt.json --mode one_call --input raw --raw-budget 96000 --ground-drops --explain-swaps --min-vs 3 --min-stages 5 --sample 50 --concurrency 3
+uv run python scripts/eval_stages.py out/idmt/cosmos_idmt.json --mode both --input raw --raw-budget 96000 --ground-drops --explain-swaps --min-vs 3 --min-stages 5 --sample 50 --concurrency 3
