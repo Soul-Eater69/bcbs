@@ -1,15 +1,21 @@
-Predict Value Streams from a single idea card (scripts/predict_value_streams.py):
-uv run python scripts/predict_value_streams.py idea_card.txt
-uv run python scripts/predict_value_streams.py idea_card.txt --count 6 --title "Real-time CPQ"
-cat idea_card.txt | uv run python scripts/predict_value_streams.py -
-uv run python scripts/predict_value_streams.py idea_card.txt --json
+Draft email to Seetha
 
-Compare idea cards vs ground truth (scripts/compare_idea_cards.py) — reads idea_cards/ (files named IDMT-19761.txt), predicts at GT count, outputs captured/missed/extra with reasons:
-uv run python scripts/compare_idea_cards.py
-uv run python scripts/compare_idea_cards.py --md out/idea_card_compare.md          # SME-ready markdown
-uv run python scripts/compare_idea_cards.py --gt out/stage_eval/stage_ground_truth.json
-uv run python scripts/compare_idea_cards.py --json > out/idea_card_compare.json
-uv run python scripts/compare_idea_cards.py --no-explain                            # skip "why missed" pass
+---
+Subject: Stage extraction — Theme→Epic link issue and fix
 
-Which one did you mean — the single-card predictor, or the GT comparison? The markdown one you asked for last is:
-uv run python scripts/compare_idea_cards.py --md out/idea_card_compare.md
+Hi Seetha,
+
+Quick update on the stage (Epic) extraction from Themes.
+
+Issue: In Jira, a Theme (GROUP issue) is connected to its Epics through the parent–child relationship, not through issue links. So when we read a Theme's inward/outward issue links, the child Epics don't appear there — the extraction was coming back with no stages for those Themes.
+
+Resolution: We switched to a reverse lookup — instead of reading the Theme's links, we query for the Epics that point up to the Theme as their parent:
+
+parent = "<THEME-KEY>" AND issuetype = Epic
+
+This returns all child Epics directly. To be robust across project configurations we also union the "Parent Link" custom field, dedupe by Epic key, and skip Cancelled Epics. Each Epic's Value Stream Stage field then gives us the stage.
+
+This is working as expected now and the Themes are returning their stages.
+
+Thanks,
+Mahesh
