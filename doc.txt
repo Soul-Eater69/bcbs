@@ -1,1 +1,15 @@
-uv run python scripts/eval_stages.py out/idmt/cosmos_idmt.json --mode both --input raw --raw-budget 96000 --ground-drops --explain-swaps --min-vs 3 --min-stages 5 --sample 50 --concurrency 3
+Predict Value Streams from a single idea card (scripts/predict_value_streams.py):
+uv run python scripts/predict_value_streams.py idea_card.txt
+uv run python scripts/predict_value_streams.py idea_card.txt --count 6 --title "Real-time CPQ"
+cat idea_card.txt | uv run python scripts/predict_value_streams.py -
+uv run python scripts/predict_value_streams.py idea_card.txt --json
+
+Compare idea cards vs ground truth (scripts/compare_idea_cards.py) — reads idea_cards/ (files named IDMT-19761.txt), predicts at GT count, outputs captured/missed/extra with reasons:
+uv run python scripts/compare_idea_cards.py
+uv run python scripts/compare_idea_cards.py --md out/idea_card_compare.md          # SME-ready markdown
+uv run python scripts/compare_idea_cards.py --gt out/stage_eval/stage_ground_truth.json
+uv run python scripts/compare_idea_cards.py --json > out/idea_card_compare.json
+uv run python scripts/compare_idea_cards.py --no-explain                            # skip "why missed" pass
+
+Which one did you mean — the single-card predictor, or the GT comparison? The markdown one you asked for last is:
+uv run python scripts/compare_idea_cards.py --md out/idea_card_compare.md
