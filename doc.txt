@@ -1,20 +1,12 @@
 uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/repository/pypi-all/simple/ --trusted-host nexus.fyiblue.com
 
 
-git checkout --theirs jwg_app/domain/models/theme_generation.py
-git checkout --theirs jwg_app/domain/services/theme/config.py
-git checkout --theirs jwg_app/domain/services/theme/output_resolver.py
-git checkout --theirs jwg_app/domain/services/theme/worklet_mapper.py
-git checkout --theirs jwg_app/domain/services/theme_generation_handler.py
-git checkout --theirs jwg_app/domain/services/theme_service.py
-git checkout --theirs jwg_app/infrastructure/repositories/__init__.py
-git checkout --theirs jwg_app/interface/dependencies/theme.py
-
-git add jwg_app/domain/models/theme_generation.py
-git add jwg_app/domain/services/theme/config.py
-git add jwg_app/domain/services/theme/output_resolver.py
-git add jwg_app/domain/services/theme/worklet_mapper.py
-git add jwg_app/domain/services/theme_generation_handler.py
-git add jwg_app/domain/services/theme_service.py
+git add jwg_app/domain/interfaces/theme_catalogue.py
+git add jwg_app/domain/services/coverage_analysis.py
+git add jwg_app/domain/services/theme/__init__.py
+git add jwg_app/domain/services/theme/prompt_builder.py
+git add jwg_app/infrastructure/database/models.py
+git add jwg_app/infrastructure/external/retry_config.py
+git add jwg_app/infrastructure/external/strict_schema.py
+git add jwg_app/infrastructure/repositories/value_stream_catalogue_repository.py
 git add jwg_app/infrastructure/repositories/__init__.py
-git add jwg_app/interface/dependencies/theme.py
