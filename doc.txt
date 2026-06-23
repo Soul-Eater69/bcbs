@@ -1,47 +1,20 @@
 uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/repository/pypi-all/simple/ --trusted-host nexus.fyiblue.com
 
 
-Hey Kalyan, wanted to walk you through all the theme-gen changes. Everything below is done on my side and already in the generation service file — the main thing I need from you is on the worklet inputs.
+git checkout --theirs jwg_app/domain/models/theme_generation.py
+git checkout --theirs jwg_app/domain/services/theme/config.py
+git checkout --theirs jwg_app/domain/services/theme/output_resolver.py
+git checkout --theirs jwg_app/domain/services/theme/worklet_mapper.py
+git checkout --theirs jwg_app/domain/services/theme_generation_handler.py
+git checkout --theirs jwg_app/domain/services/theme_service.py
+git checkout --theirs jwg_app/infrastructure/repositories/__init__.py
+git checkout --theirs jwg_app/interface/dependencies/theme.py
 
-1. ThemeService
-The ThemeGenerationHandler now takes a ThemeService instance — it reads the VS name, description, value proposition, trigger, stages and L3/L2 capabilities from SQL. I've already created the instance and passed it into the handler via DI in the generation service file, so that's wired up.
-
-2. Multiple themes in → out
-The handler now works on a list. It takes a list of THEME stubs (one per approved value stream) and returns the same list back, each enriched with the generated content (title, description, Business Needs, selectedStages, L3 and L2 capabilities). It's all-or-nothing as per the approved design — if any one VS fails, the whole request fails, no partial themes.
-
-3. Worklet contract — VS id
-Each theme stub needs to carry the value-stream id as a property named valueStreamId (e.g. VS10000372 / VSR…). We retrieve it from the worklet by that exact property name — not from parentWorkletId. That id is the only thing we need off the stub; everything else we pull from SQL using it.
-
-4. Coverage / ANALYSE — rawText
-For coverage scoring, the ER worklet needs a rawText property holding the raw ticket text — that's the only context we score the themes against. I take the ER worklet in and return the same ER worklet back with one added property called analysis, which holds the Coverage and Creativity scores. Schema:
-
-{
-  "propertyName": "analysis",
-  "propertyValue": [
-    {
-      "metric_name": "Coverage",
-      "metric_value": {
-        "score": 0.78,
-        "highlighted_text": "<span style='background-color: green'>...covered raw text...</span> ..."
-      }
-    },
-    {
-      "metric_name": "Creativity",
-      "metric_value": {
-        "score": 0.42,
-        "scores": [0.35, 0.50, 0.41],
-        "highlighted_text": [
-          [
-            { "propertyName": "title",       "propertyValue": "... <span style='background-color: orange'>new text</span>" },
-            { "propertyName": "description", "propertyValue": "..." }
-          ]
-        ]
-      }
-    }
-  ]
-}
-
-It's a list of 2 metrics — Coverage (one overall score + the raw text with covered parts highlighted) and Creativity (overall score + per-theme scores + per-theme highlighted title/description). Already JSON-safe, drops straight into the response.
-
-What I need from your side
-valueStreamId (on the theme stubs) and rawText (on the ER worklet) aren't on the worklets today, but my DS solution depends on both, so we'll need them added on the worklet/API side. Can you get those in? And whenever you get a chance, have a look at the code I sent and confirm it lines up with your integration side.
+git add jwg_app/domain/models/theme_generation.py
+git add jwg_app/domain/services/theme/config.py
+git add jwg_app/domain/services/theme/output_resolver.py
+git add jwg_app/domain/services/theme/worklet_mapper.py
+git add jwg_app/domain/services/theme_generation_handler.py
+git add jwg_app/domain/services/theme_service.py
+git add jwg_app/infrastructure/repositories/__init__.py
+git add jwg_app/interface/dependencies/theme.py
