@@ -140,3 +140,12 @@ uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/reposito
     }
   ]
 }
+
+{
+  "action": "ANALYSE",
+  "source": {
+    "id": "<ER_WORKLET_ID>",
+    "worklet_type": "ENGAGEMENT_REQUEST",
+    "source_id": "<ER_SOURCE_ID>"
+  }
+}
