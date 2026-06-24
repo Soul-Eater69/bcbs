@@ -4,7 +4,8 @@ uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/reposito
 {
   "action": "GENERATE",
   "source": {
-    "id": null,
+    "id": "App10001",
+    "sourceId": "ER-TEST-001",
     "parentWorkletId": null,
     "workletType": "ENGAGEMENT_REQUEST",
     "index": 0,
@@ -19,7 +20,6 @@ uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/reposito
       }
     ]
   },
-  "sourceId": "ER-TEST-001",
   "currentUser": {
     "lanId": "test-user",
     "email": "test@example.com",
@@ -27,6 +27,5 @@ uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/reposito
   },
   "workletMap": {},
   "userHistory": [],
-  "state": null,
-  "_etag": null
+  "state": null
 }
