@@ -2,30 +2,41 @@ uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/reposito
 
 
 {
-  "action": "GENERATE",
-  "source": {
-    "id": "App10001",
-    "sourceId": "ER-TEST-001",
-    "parentWorkletId": null,
-    "workletType": "ENGAGEMENT_REQUEST",
-    "index": 0,
-    "properties": [
-      {
-        "propertyName": "title",
-        "propertyValue": "Customer Onboarding Improvement"
-      },
-      {
-        "propertyName": "description",
-        "propertyValue": "The client wants to improve customer onboarding by reducing manual handoffs, improving visibility, and automating key workflow steps."
-      }
-    ]
-  },
-  "currentUser": {
-    "lanId": "test-user",
-    "email": "test@example.com",
-    "displayName": "Test User"
-  },
-  "workletMap": {},
-  "userHistory": [],
-  "state": null
+  "action": null,
+  "source": [
+    {
+      "id": "6c0fdac4-a523-48d9-bb53-6b4498aec022",
+      "workletType": "VALUE_STREAM",
+      "parentWorkletId": "8c141c43-0d5f-4dc4-aeed-b2f30729f72b",
+      "sourceId": "314202",
+      "index": null,
+      "properties": [
+        {
+          "propertyName": "title",
+          "propertyValue": "Configure, Price and Quote"
+        },
+        {
+          "propertyName": "valueStreamId",
+          "propertyValue": "VSR00074586"
+        },
+        {
+          "propertyName": "Rationale",
+          "propertyValue": "The ER describes quote configuration and pricing approval workflows..."
+        },
+        {
+          "propertyName": "additionalInstruction",
+          "propertyValue": "Focus on digital experience..."
+        },
+        {
+          "propertyName": "Confidence Score",
+          "propertyValue": 88
+        },
+        {
+          "propertyName": "evidenceBucket",
+          "propertyValue": "Implied"
+        }
+      ],
+      "state": "C"
+    }
+  ]
 }
