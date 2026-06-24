@@ -2,35 +2,23 @@ uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/reposito
 
 
 {
-  "action": null,
-  "source": {
-    "id": "8c141c43-0d5f-4dc4-aeed-b2f30729f72b",
-    "sourceId": "314202",
-    "parentWorkletId": null,
-    "workletType": "ENGAGEMENT_REQUEST",
-    "index": null,
-    "properties": [
-      {
-        "propertyName": "summary",
-        "propertyValue": "Updated ER title here"
-      },
-      {
-        "propertyName": "description",
-        "propertyValue": "Updated ER description here"
-      },
-      {
-        "propertyName": "projectId",
-        "propertyValue": "19509"
-      },
-      {
-        "propertyName": "projectKey",
-        "propertyValue": "IDMT"
-      },
-      {
-        "propertyName": "issueKey",
-        "propertyValue": "IDMT-1410"
-      }
-    ],
-    "state": "C"
-  }
+  "action": "GENERATE",
+  "source": [
+    {
+      "id": null,
+      "workletType": "THEME",
+      "parentWorkletId": "VS_WORKLET_ID",
+      "sourceId": "314202",
+      "properties": [
+        {
+          "propertyName": "title",
+          "propertyValue": "Theme stub title"
+        },
+        {
+          "propertyName": "description",
+          "propertyValue": "Theme stub description"
+        }
+      ]
+    }
+  ]
 }
