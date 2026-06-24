@@ -5,20 +5,138 @@ uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/reposito
   "action": "GENERATE",
   "source": [
     {
-      "id": null,
-      "workletType": "THEME",
-      "parentWorkletId": "VS_WORKLET_ID",
-      "sourceId": "314202",
+      "id": "84bd46a6-ca72-4d78-a3ba-d32a065e6ff5",
+      "parentWorkletId": "f61d12b1-533a-4175-9f29-972f4d1483f7",
+      "workletType": "VALUE_STREAM",
+      "index": null,
       "properties": [
         {
           "propertyName": "title",
-          "propertyValue": "Theme stub title"
+          "propertyValue": "Configure, Price and Quote"
+        },
+        {
+          "propertyName": "valueStreamId",
+          "propertyValue": "VSR00074586"
+        },
+        {
+          "propertyName": "Rationale",
+          "propertyValue": "The ER describes quote configuration and pricing approval workflows..."
+        },
+        {
+          "propertyName": "additionalInstruction",
+          "propertyValue": "Focus on digital experience..."
+        },
+        {
+          "propertyName": "Confidence Score",
+          "propertyValue": 88
+        },
+        {
+          "propertyName": "evidenceBucket",
+          "propertyValue": "Implied"
+        }
+      ],
+      "sourceId": "317219",
+      "state": "U"
+    },
+    {
+      "id": "9a053636-080a-46e7-bbb7-8428afaaea26",
+      "parentWorkletId": "f61d12b1-533a-4175-9f29-972f4d1483f7",
+      "workletType": "VALUE_STREAM",
+      "index": null,
+      "properties": [
+        {
+          "propertyName": "valueStreamId",
+          "propertyValue": "VSR00074583"
+        },
+        {
+          "propertyName": "title",
+          "propertyValue": "Acquire Asset"
         },
         {
           "propertyName": "description",
-          "propertyValue": "Theme stub description"
+          "propertyValue": "The end-to-end view from initiating a asset request to delivering the asset to the requester"
+        },
+        {
+          "propertyName": "rationale",
+          "propertyValue": "Direct fit to selling/enrolling individual policies"
+        },
+        {
+          "propertyName": "confidenceScore",
+          "propertyValue": 95
+        },
+        {
+          "propertyName": "evidenceBucket",
+          "propertyValue": ""
+        },
+        {
+          "propertyName": "valueStreamTrigger",
+          "propertyValue": "Retail Sales"
+        },
+        {
+          "propertyName": "valueStreamValueProposition",
+          "propertyValue": "Individual coverage is sold and members are enrolled"
+        },
+        {
+          "propertyName": "valueStreamAssumptions",
+          "propertyValue": ""
+        },
+        {
+          "propertyName": "businessValueStream",
+          "propertyValue": "Sell and Enroll Individual Coverage {VSR00074610}"
         }
-      ]
+      ],
+      "sourceId": "317219",
+      "state": "U"
+    },
+    {
+      "id": "99fa7ec0-1ba8-4a3a-961b-05bc11f9a21e",
+      "parentWorkletId": "f61d12b1-533a-4175-9f29-972f4d1483f7",
+      "workletType": "VALUE_STREAM",
+      "index": null,
+      "properties": [
+        {
+          "propertyName": "valueStreamId",
+          "propertyValue": "VSR00074584"
+        },
+        {
+          "propertyName": "title",
+          "propertyValue": "Adjudicate Claim"
+        },
+        {
+          "propertyName": "description",
+          "propertyValue": "The organization, pricing, updating, processing, and filing of medical claims related to patient diagnoses, treatments and medications"
+        },
+        {
+          "propertyName": "rationale",
+          "propertyValue": "Direct fit to selling/enrolling individual policies"
+        },
+        {
+          "propertyName": "confidenceScore",
+          "propertyValue": 95
+        },
+        {
+          "propertyName": "evidenceBucket",
+          "propertyValue": ""
+        },
+        {
+          "propertyName": "valueStreamTrigger",
+          "propertyValue": "Retail Sales"
+        },
+        {
+          "propertyName": "valueStreamValueProposition",
+          "propertyValue": "Individual coverage is sold and members are enrolled"
+        },
+        {
+          "propertyName": "valueStreamAssumptions",
+          "propertyValue": ""
+        },
+        {
+          "propertyName": "businessValueStream",
+          "propertyValue": "Sell and Enroll Individual Coverage {VSR00074610}"
+        }
+      ],
+      "sourceId": "317219",
+      "state": "U"
     }
   ]
 }
