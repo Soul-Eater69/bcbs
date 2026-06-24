@@ -1,14 +1,32 @@
 uv pip install idp-common==0.1.58 --index-url https://nexus.fyiblue.com/repository/pypi-all/simple/ --trusted-host nexus.fyiblue.com
 
 
-git checkout --theirs configs/user_config.yaml
-git checkout --theirs jwg_app/domain/models/theme_generation.py
-git checkout --theirs jwg_app/domain/services/theme_generation_handler.py
-git checkout --theirs jwg_app/infrastructure/database/models.py
-git checkout --theirs jwg_app/infrastructure/repositories/__init__.py
-
-git add configs/user_config.yaml
-git add jwg_app/domain/models/theme_generation.py
-git add jwg_app/domain/services/theme_generation_handler.py
-git add jwg_app/infrastructure/database/models.py
-git add jwg_app/infrastructure/repositories/__init__.py
+{
+  "action": "GENERATE",
+  "source": {
+    "id": null,
+    "parentWorkletId": null,
+    "workletType": "ENGAGEMENT_REQUEST",
+    "index": 0,
+    "properties": [
+      {
+        "propertyName": "title",
+        "propertyValue": "Customer Onboarding Improvement"
+      },
+      {
+        "propertyName": "description",
+        "propertyValue": "The client wants to improve customer onboarding by reducing manual handoffs, improving visibility, and automating key workflow steps."
+      }
+    ]
+  },
+  "sourceId": "ER-TEST-001",
+  "currentUser": {
+    "lanId": "test-user",
+    "email": "test@example.com",
+    "displayName": "Test User"
+  },
+  "workletMap": {},
+  "userHistory": [],
+  "state": null,
+  "_etag": null
+}
