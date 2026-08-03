@@ -1,11 +1,12 @@
- You are evaluating how much information from a stage is reflected in a human-written epic.
+You are evaluating how much information from a stage is reflected in a human-written epic.
 
-Your task is limited to measuring stage-context coverage.
+Your task is limited to identifying stage-information coverage.
 
 Do not evaluate the quality of the epic.
 Do not rewrite or improve any text.
 Do not claim that the stage caused the epic content.
 Do not add information that is not present in the input.
+Do not calculate or return coverage percentages.
 
 ## Stage fields
 
@@ -26,22 +27,36 @@ The epic contains three string fields:
 
 ## Evaluation instructions
 
-1. Internally identify the distinct meaningful information contained in each stage field.
+1. Internally identify the distinct meaningful pieces of information contained in each stage field.
 
-Do not return these internal information units in the output.
+Do not return these internal pieces individually.
 
-2. Compare the meaning of each stage field against all three epic fields:
+Use these rules consistently:
+
+* A non-empty stage name normally contains one meaningful item.
+* Each independent entrance criterion normally counts as one meaningful item.
+* Each independent exit criterion normally counts as one meaningful item.
+* Split a stage description only when it clearly contains multiple independent meanings.
+* Do not split one meaning merely because it contains multiple words or phrases.
+* Do not count duplicate or repeated wording within the same stage field as additional information.
+
+2. For every stage field, determine:
+
+* `total_items`: Number of meaningful information items available in that field.
+* `covered_items`: Number of those items clearly reflected somewhere in the epic.
+
+3. Compare every stage field against all three epic fields:
 
 * Title
 * Description
 * Success criteria
 
-3. Count stage information as covered only when the epic contains:
+4. Count a stage-information item as covered only when the epic contains:
 
 * The same meaning directly, or
 * A clear semantic paraphrase
 
-4. Do not count:
+5. Do not count:
 
 * A shared word with a different meaning
 * Weak or indirect associations
@@ -49,54 +64,41 @@ Do not return these internal information units in the output.
 * Generic business terminology
 * Information requiring substantial inference
 
-5. Assign a coverage score between `0.0` and `1.0` for each stage field:
+6. Count each meaningful stage item only once within its source stage field, even when it appears in multiple epic fields.
 
-* `0.0`: None of the field’s meaningful information is reflected
-* `0.25`: A small portion is reflected
-* `0.5`: About half is reflected
-* `0.75`: Most is reflected
-* `1.0`: All or nearly all is reflected
+For example, when one exit-criteria item appears in both the epic description and success criteria:
 
-Intermediate values such as `0.4`, `0.6`, or `0.85` are allowed.
+* Count it as one covered exit-criteria item
+* Include both exact quotations in the evidence when useful
 
-6. Calculate `overall_stage_coverage` as:
+7. For every stage field with at least one covered item, provide exact supporting evidence copied from the epic.
 
-`total meaningful stage inMon reflected anywhere in the epic / total meaningful stage information available`
+Each evidence item must contain:
 
-Consider information from:
+* The epic field where the evidence appears
+* The exact matching text copied from that epic field
 
-* Stage name
-* Stage description
-* Entrance criteria
-* Exit criteria
+8. Evidence may be an exact substring or the complete epic field.
 
-Do not calculate the overall score by simply averaging the four field-level scores.
+Do not rewrite, shorten, summarize, correct, or paraphrase the evidence.
 
-A stage field containing more meaningful information should contribute proportionally more to the overall score.
+9. The same epic quotation may support multiple stage fields only when it genuinely reflects information from each field.
 
-7. For `stage_usage_locations`, return `true` when at least one reliable piece of stage information appears in that epic field.
+10. For `stage_usage_locations`, return `true` when at least one reliable piece of stage information is reflected in that epic field.
 
-8. For every stage field with coverage greater than `0.0`, provide exact supporting evidence copied from the epic.
+11. When a stage field is non-empty but none of its information is reflected:
 
-9. Each evidence item must identify:
-
-* The epic field containing the evidence
-* The exact matching text
-
-10. Evidence may be an exact substring or the complete epic field, but it must be copied exactly without rewriting or paraphrasing.
-
-11. The same epic text may support multiple stage fields only when it genuinely reflects information from each field.
-
-12. If a stage field has no reliable match:
-
-* Set its coverage to `0.0`
-* Return an empty evidence array for that field
-
-13. If a stage field is empty or unavailable:
-
-* Set its coverage to `0.0`
+* Return its correct `total_items`
+* Set `covered_items` to `0`
 * Return an empty evidence array
-* Exclude it from the calculation of `overall_stage_coverage`
+
+12. When a stage field is empty or unavailable:
+
+* Set `total_items` to `0`
+* Set `covered_items` to `0`
+* Return an empty evidence array
+
+13. `covered_items` must never be greater than `total_items`.
 
 ## Input
 
@@ -150,18 +152,29 @@ A stage field containing more meaningful information should contribute proportio
 
 ## Required output
 
-Return an object conforming exactly to the supplied `StageCoverageOutput` schema.
+Return an object conforming exactly to the supplied `StageCoverageOutput` Pydantic schema.
 
-The output must contain:
+The output must follow this structure:
 
 {
 "epic_id": "string",
-"overall_stage_coverage": 0.0,
-"coverage_by_stage_field": {
-"stage_name": 0.0,
-"stage_description": 0.0,
-"entrance_criteria": 0.0,
-"exit_criteria": 0.0
+"stage_field_counts": {
+"stage_name": {
+"total_items": 0,
+"covered_items": 0
+},
+"stage_description": {
+"total_items": 0,
+"covered_items": 0
+},
+"entrance_criteria": {
+"total_items": 0,
+"covered_items": 0
+},
+"exit_criteria": {
+"total_items": 0,
+"covered_items": 0
+}
 },
 "stage_usage_locations": {
 "title": false,
@@ -185,14 +198,16 @@ The output must contain:
 
 * Follow the supplied Pydantic schema exactly.
 * Do not include additional fields.
-* Round all coverage scores to three decimal places.
-* Every score must be between `0.0` and `1.0`.
+* Return structured output only.
+* Do not return coverage scores or percentages.
+* All item counts must be non-negative integers.
+* `covered_items` must be less than or equal to `total_items`.
 * Valid `epic_field` values are:
 
   * `title`
   * `description`
   * `success_criteria`
-* Every positive field-level score must have at least one evidence item.
-* A field with a score of `0.0` must have an empty evidence array.
+* A stage field with `covered_items` greater than `0` must have supporting evidence.
+* A stage field with `covered_items` equal to `0` must have an empty evidence array.
 * `stage_usage_locations` must agree with the locations present in the evidence.
 * Before returning, verify that every evidence quotation was copied exactly from the supplied epic.
