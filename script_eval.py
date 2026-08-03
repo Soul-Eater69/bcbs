@@ -1,701 +1,801 @@
 import json
-from pathlib import Path
 from collections import Counter
 
-import numpy as np
 import pandas as pd
 
 
-# ============================================================
-# UPDATE ONLY THESE PATHS
-# ============================================================
+# ---------------------------------------------------------
+# CHANGE THIS ONLY IF YOUR LIST HAS A DIFFERENT VARIABLE NAME
+# ---------------------------------------------------------
+records = results
 
-FILES = {
-    "run_1": "run_1.json",
-    "run_2": "run_2.json",
-    "run_3": "run_3.json",
-}
 
-STAGE_FIELDS = [
+# Convert Pydantic objects to dictionaries when necessary
+def to_dict(item):
+    if hasattr(item, "model_dump"):
+        return item.model_dump()
+
+    if isinstance(item, dict):
+        return item
+
+    raise TypeError(f"Unsupported record type: {type(item)}")
+
+
+records = [to_dict(record) for record in records]
+
+print(f"Total epics analyzed: {len(records)}")
+
+
+# =========================================================
+# SECTION 1: OVERALL STAGE COVERAGE
+# =========================================================
+
+overall_rows = []
+
+for record in records:
+    overall_rows.append(
+        {
+            "epic_id": record.get("epic_id"),
+            "overall_stage_coverage": record.get(
+                "overall_stage_coverage", 0
+            ),
+        }
+    )
+
+overall_df = pd.DataFrame(overall_rows)
+
+overall_df["overall_stage_coverage"] = pd.to_numeric(
+    overall_df["overall_stage_coverage"],
+    errors="coerce",
+)
+
+
+def coverage_bucket(score):
+    if pd.isna(score):
+        return "Missing"
+    if score == 0:
+        return "No coverage"
+    if score <= 0.25:
+        return "Low: 0-25%"
+    if score <= 0.50:
+        return "Moderate: 25-50%"
+    if score <= 0.75:
+        return "High: 50-75%"
+    return "Very high: 75-100%"
+
+
+overall_df["coverage_bucket"] = overall_df[
+    "overall_stage_coverage"
+].apply(coverage_bucket)
+
+print("\n" + "=" * 70)
+print("SECTION 1: OVERALL STAGE COVERAGE")
+print("=" * 70)
+
+print(
+    pd.DataFrame(
+        {
+            "metric": [
+                "Total epics",
+                "Mean coverage",
+                "Median coverage",
+                "Minimum coverage",
+                "Maximum coverage",
+                "Epics with zero coverage",
+                "Epics above 25%",
+                "Epics above 50%",
+                "Epics above 75%",
+            ],
+            "value": [
+                len(overall_df),
+                round(
+                    overall_df["overall_stage_coverage"].mean(),
+                    3,
+                ),
+                round(
+                    overall_df["overall_stage_coverage"].median(),
+                    3,
+                ),
+                round(
+                    overall_df["overall_stage_coverage"].min(),
+                    3,
+                ),
+                round(
+                    overall_df["overall_stage_coverage"].max(),
+                    3,
+                ),
+                int(
+                    (
+                        overall_df["overall_stage_coverage"] == 0
+                    ).sum()
+                ),
+                int(
+                    (
+                        overall_df["overall_stage_coverage"] > 0.25
+                    ).sum()
+                ),
+                int(
+                    (
+                        overall_df["overall_stage_coverage"] > 0.50
+                    ).sum()
+                ),
+                int(
+                    (
+                        overall_df["overall_stage_coverage"] > 0.75
+                    ).sum()
+                ),
+            ],
+        }
+    ).to_string(index=False)
+)
+
+print("\nCoverage buckets:")
+
+bucket_summary = (
+    overall_df["coverage_bucket"]
+    .value_counts()
+    .rename_axis("coverage_bucket")
+    .reset_index(name="epic_count")
+)
+
+bucket_summary["percentage"] = (
+    bucket_summary["epic_count"] / len(overall_df) * 100
+).round(2)
+
+print(bucket_summary.to_string(index=False))
+
+
+# =========================================================
+# SECTION 2: WHICH STAGE FIELDS ARE USED MOST?
+# =========================================================
+
+stage_fields = [
     "stage_name",
     "stage_description",
     "entrance_criteria",
     "exit_criteria",
 ]
 
-EPIC_FIELDS = [
+field_rows = []
+
+for record in records:
+    field_coverage = record.get(
+        "coverage_by_stage_field", {}
+    )
+
+    for field in stage_fields:
+        field_rows.append(
+            {
+                "epic_id": record.get("epic_id"),
+                "stage_field": field,
+                "coverage": field_coverage.get(field, 0),
+            }
+        )
+
+field_df = pd.DataFrame(field_rows)
+
+field_df["coverage"] = pd.to_numeric(
+    field_df["coverage"],
+    errors="coerce",
+)
+
+field_summary = (
+    field_df.groupby("stage_field")
+    .agg(
+        epic_count=("epic_id", "count"),
+        mean_coverage=("coverage", "mean"),
+        median_coverage=("coverage", "median"),
+        zero_coverage_count=(
+            "coverage",
+            lambda values: int((values == 0).sum()),
+        ),
+        positive_coverage_count=(
+            "coverage",
+            lambda values: int((values > 0).sum()),
+        ),
+        above_50_percent_count=(
+            "coverage",
+            lambda values: int((values > 0.5).sum()),
+        ),
+    )
+    .reset_index()
+)
+
+field_summary["zero_coverage_percentage"] = (
+    field_summary["zero_coverage_count"]
+    / field_summary["epic_count"]
+    * 100
+).round(2)
+
+field_summary["positive_coverage_percentage"] = (
+    field_summary["positive_coverage_count"]
+    / field_summary["epic_count"]
+    * 100
+).round(2)
+
+field_summary["mean_coverage"] = field_summary[
+    "mean_coverage"
+].round(3)
+
+field_summary["median_coverage"] = field_summary[
+    "median_coverage"
+].round(3)
+
+field_summary = field_summary.sort_values(
+    "mean_coverage",
+    ascending=False,
+)
+
+print("\n" + "=" * 70)
+print("SECTION 2: COVERAGE BY STAGE FIELD")
+print("=" * 70)
+
+print(field_summary.to_string(index=False))
+
+
+# =========================================================
+# SECTION 3: WHERE IS STAGE INFORMATION USED?
+# =========================================================
+
+epic_fields = [
     "title",
     "description",
     "success_criteria",
 ]
 
+location_rows = []
 
-# ============================================================
-# HELPERS
-# ============================================================
+for record in records:
+    locations = record.get("stage_usage_locations", {})
 
-def extract_records(data):
-    """
-    Supports:
-    - A direct list of results
-    - {"results": [...]}
-    - {"data": [...]}
-    - {"items": [...]}
-    - A dictionary keyed by epic_id
-    """
+    location_rows.append(
+        {
+            "epic_id": record.get("epic_id"),
+            "title": bool(locations.get("title", False)),
+            "description": bool(
+                locations.get("description", False)
+            ),
+            "success_criteria": bool(
+                locations.get("success_criteria", False)
+            ),
+        }
+    )
 
-    if isinstance(data, list):
-        return data
+location_df = pd.DataFrame(location_rows)
 
-    if isinstance(data, dict):
-        for key in [
-            "results",
-            "data",
-            "items",
-            "records",
-            "evaluations",
-            "outputs",
-        ]:
-            if isinstance(data.get(key), list):
-                return data[key]
+location_summary_rows = []
 
-        if "epic_id" in data and "stage_field_counts" in data:
-            return [data]
+for field in epic_fields:
+    used_count = int(location_df[field].sum())
 
-        if data and all(isinstance(value, dict) for value in data.values()):
-            records = []
+    location_summary_rows.append(
+        {
+            "epic_field": field,
+            "epics_using_stage_context": used_count,
+            "percentage_of_epics": round(
+                used_count / len(location_df) * 100,
+                2,
+            ),
+        }
+    )
 
-            for epic_id, value in data.items():
-                record = dict(value)
-                record.setdefault("epic_id", str(epic_id))
-                records.append(record)
+location_summary = pd.DataFrame(location_summary_rows)
 
-            return records
+print("\n" + "=" * 70)
+print("SECTION 3: STAGE USAGE BY EPIC FIELD")
+print("=" * 70)
 
-    raise ValueError(
-        "Could not recognize the JSON structure. "
-        "Please print the top-level keys separately."
+print(location_summary.to_string(index=False))
+
+
+def get_location_pattern(row):
+    used_locations = [
+        field
+        for field in epic_fields
+        if row[field]
+    ]
+
+    if not used_locations:
+        return "No stage usage"
+
+    return " + ".join(used_locations)
+
+
+location_df["location_pattern"] = location_df.apply(
+    get_location_pattern,
+    axis=1,
+)
+
+pattern_summary = (
+    location_df["location_pattern"]
+    .value_counts()
+    .rename_axis("usage_pattern")
+    .reset_index(name="epic_count")
+)
+
+pattern_summary["percentage"] = (
+    pattern_summary["epic_count"]
+    / len(location_df)
+    * 100
+).round(2)
+
+print("\nUsage-location combinations:")
+print(pattern_summary.to_string(index=False))
+
+
+# =========================================================
+# SECTION 4: STAGE FIELD -> EPIC FIELD MAPPING
+# =========================================================
+
+mapping_records = []
+
+for record in records:
+    epic_id = record.get("epic_id")
+    evidence = record.get("evidence", {})
+
+    for stage_field in stage_fields:
+        evidence_items = evidence.get(stage_field, []) or []
+
+        for item in evidence_items:
+            epic_field = item.get("epic_field")
+
+            if epic_field not in epic_fields:
+                continue
+
+            mapping_records.append(
+                {
+                    "epic_id": epic_id,
+                    "stage_field": stage_field,
+                    "epic_field": epic_field,
+                    "evidence_text": item.get("text", ""),
+                }
+            )
+
+mapping_df = pd.DataFrame(mapping_records)
+
+print("\n" + "=" * 70)
+print("SECTION 4: STAGE FIELD TO EPIC FIELD MAPPING")
+print("=" * 70)
+
+if mapping_df.empty:
+    print("No evidence mappings were found.")
+else:
+    unique_mapping_df = mapping_df.drop_duplicates(
+        subset=[
+            "epic_id",
+            "stage_field",
+            "epic_field",
+        ]
+    )
+
+    mapping_table = pd.crosstab(
+        unique_mapping_df["stage_field"],
+        unique_mapping_df["epic_field"],
+    )
+
+    mapping_table = mapping_table.reindex(
+        index=stage_fields,
+        columns=epic_fields,
+        fill_value=0,
+    )
+
+    print(mapping_table.to_string())
+
+    print(
+        "\nEach number represents the number of epics where "
+        "that stage field was found in that epic field."
     )
 
 
-def safe_number(value):
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return np.nan
+# =========================================================
+# SECTION 5: WHICH STAGE FIELDS ARE UNUSED?
+# =========================================================
+
+unused_rows = []
+
+for field in stage_fields:
+    field_records = field_df[
+        field_df["stage_field"] == field
+    ]
+
+    unused_count = int(
+        (field_records["coverage"] == 0).sum()
+    )
+
+    unused_rows.append(
+        {
+            "stage_field": field,
+            "unused_epic_count": unused_count,
+            "unused_percentage": round(
+                unused_count / len(records) * 100,
+                2,
+            ),
+        }
+    )
+
+unused_summary = pd.DataFrame(unused_rows).sort_values(
+    "unused_percentage",
+    ascending=False,
+)
+
+print("\n" + "=" * 70)
+print("SECTION 5: UNUSED STAGE FIELDS")
+print("=" * 70)
+
+print(unused_summary.to_string(index=False))
+
+zero_coverage_epics = overall_df[
+    overall_df["overall_stage_coverage"] == 0
+][["epic_id", "overall_stage_coverage"]]
+
+print("\nEpics with zero overall stage coverage:")
+
+if zero_coverage_epics.empty:
+    print("None")
+else:
+    print(zero_coverage_epics.to_string(index=False))
 
 
-def safe_coverage(covered, total):
-    if pd.isna(covered) or pd.isna(total) or total <= 0:
-        return np.nan
+# =========================================================
+# SECTION 6: COVERAGE BY ACTUAL STAGE NAME
+# Runs only if stage_name exists in each record
+# =========================================================
 
-    return covered / total
+stage_name_rows = []
+
+for record in records:
+    stage_name = (
+        record.get("stage_name")
+        or record.get("stage", {}).get("name")
+    )
+
+    if stage_name:
+        stage_name_rows.append(
+            {
+                "epic_id": record.get("epic_id"),
+                "stage_name": stage_name,
+                "overall_stage_coverage": record.get(
+                    "overall_stage_coverage", 0
+                ),
+            }
+        )
+
+print("\n" + "=" * 70)
+print("SECTION 6: COVERAGE BY ACTUAL STAGE")
+print("=" * 70)
+
+if not stage_name_rows:
+    print(
+        "Skipped because the actual stage name is not present "
+        "in the evaluator-output records."
+    )
+else:
+    stage_name_df = pd.DataFrame(stage_name_rows)
+
+    coverage_by_stage = (
+        stage_name_df.groupby("stage_name")
+        .agg(
+            epic_count=("epic_id", "count"),
+            mean_coverage=(
+                "overall_stage_coverage",
+                "mean",
+            ),
+            median_coverage=(
+                "overall_stage_coverage",
+                "median",
+            ),
+            minimum_coverage=(
+                "overall_stage_coverage",
+                "min",
+            ),
+            maximum_coverage=(
+                "overall_stage_coverage",
+                "max",
+            ),
+        )
+        .reset_index()
+        .sort_values(
+            "mean_coverage",
+            ascending=False,
+        )
+        .round(3)
+    )
+
+    print(coverage_by_stage.to_string(index=False))
 
 
-# ============================================================
-# LOAD AND NORMALIZE
-# ============================================================
+# =========================================================
+# SECTION 7: SAME EVIDENCE USED FOR MULTIPLE STAGE FIELDS
+# =========================================================
 
-rows = []
-evidence_rows = []
-schema_details = {}
+print("\n" + "=" * 70)
+print("SECTION 7: REUSED EVIDENCE")
+print("=" * 70)
+
+if mapping_df.empty:
+    print("No evidence was available.")
+else:
+    mapping_df["normalized_evidence"] = (
+        mapping_df["evidence_text"]
+        .fillna("")
+        .str.lower()
+        .str.replace(r"\s+", " ", regex=True)
+        .str.strip()
+    )
+
+    reused_evidence = (
+        mapping_df[
+            mapping_df["normalized_evidence"] != ""
+        ]
+        .groupby(
+            [
+                "epic_id",
+                "epic_field",
+                "normalized_evidence",
+            ]
+        )
+        .agg(
+            stage_field_count=(
+                "stage_field",
+                "nunique",
+            ),
+            stage_fields=(
+                "stage_field",
+                lambda values: ", ".join(
+                    sorted(set(values))
+                ),
+            ),
+        )
+        .reset_index()
+    )
+
+    reused_evidence = reused_evidence[
+        reused_evidence["stage_field_count"] > 1
+    ]
+
+    if reused_evidence.empty:
+        print(
+            "No identical epic evidence was assigned to "
+            "multiple stage fields."
+        )
+    else:
+        print(
+            reused_evidence[
+                [
+                    "epic_id",
+                    "epic_field",
+                    "stage_fields",
+                    "normalized_evidence",
+                ]
+            ].to_string(index=False)
+        )
+
+        print(
+            f"\nTotal repeated-evidence cases: "
+            f"{len(reused_evidence)}"
+        )
+
+
+# =========================================================
+# SECTION 8: EVALUATOR CONSISTENCY CHECKS
+# =========================================================
+
 validation_issues = []
 
-for run_name, file_path in FILES.items():
-    path = Path(file_path)
+for record in records:
+    epic_id = record.get("epic_id")
+    overall_score = record.get(
+        "overall_stage_coverage"
+    )
 
-    with path.open("r", encoding="utf-8") as file:
-        raw = json.load(file)
+    field_coverage = record.get(
+        "coverage_by_stage_field", {}
+    )
 
-    records = extract_records(raw)
+    evidence = record.get("evidence", {})
+    locations = record.get(
+        "stage_usage_locations", {}
+    )
 
-    schema_details[run_name] = {
-        "top_level_type": type(raw).__name__,
-        "top_level_keys": (
-            list(raw.keys())[:20]
-            if isinstance(raw, dict)
-            else None
-        ),
-        "record_count": len(records),
-        "first_record_keys": (
-            list(records[0].keys())
-            if records and isinstance(records[0], dict)
-            else None
-        ),
-    }
+    if not isinstance(overall_score, (int, float)):
+        validation_issues.append(
+            {
+                "epic_id": epic_id,
+                "issue": "Overall coverage is not numeric",
+            }
+        )
+    elif not 0 <= overall_score <= 1:
+        validation_issues.append(
+            {
+                "epic_id": epic_id,
+                "issue": "Overall coverage outside 0-1",
+            }
+        )
 
-    epic_ids = []
+    evidence_locations = set()
 
-    for index, record in enumerate(records):
-        if not isinstance(record, dict):
+    for stage_field in stage_fields:
+        score = field_coverage.get(stage_field, 0)
+        items = evidence.get(stage_field, []) or []
+
+        if not isinstance(score, (int, float)):
             validation_issues.append(
                 {
-                    "run": run_name,
-                    "epic_id": f"row_{index}",
-                    "issue": "record_is_not_an_object",
+                    "epic_id": epic_id,
+                    "issue": (
+                        f"{stage_field} coverage is not numeric"
+                    ),
                 }
             )
             continue
 
-        epic_id = str(record.get("epic_id", "")).strip()
-
-        if not epic_id:
-            epic_id = f"missing_id_row_{index}"
+        if not 0 <= score <= 1:
             validation_issues.append(
                 {
-                    "run": run_name,
                     "epic_id": epic_id,
-                    "issue": "missing_epic_id",
+                    "issue": (
+                        f"{stage_field} coverage outside 0-1"
+                    ),
                 }
             )
 
-        epic_ids.append(epic_id)
-
-        counts = record.get("stage_field_counts", {})
-        locations = record.get("stage_usage_locations", {})
-        evidence = record.get("evidence", {})
-
-        row = {
-            "run": run_name,
-            "epic_id": epic_id,
-        }
-
-        overall_total = 0
-        overall_covered = 0
-        has_valid_counts = False
-
-        for stage_field in STAGE_FIELDS:
-            field_counts = counts.get(stage_field, {})
-
-            total_items = safe_number(
-                field_counts.get("total_items")
-            )
-            covered_items = safe_number(
-                field_counts.get("covered_items")
+        if score > 0 and len(items) == 0:
+            validation_issues.append(
+                {
+                    "epic_id": epic_id,
+                    "issue": (
+                        f"{stage_field} has positive coverage "
+                        "but no evidence"
+                    ),
+                }
             )
 
-            row[f"{stage_field}_total"] = total_items
-            row[f"{stage_field}_covered"] = covered_items
-            row[f"{stage_field}_coverage"] = safe_coverage(
-                covered_items,
-                total_items,
+        if score == 0 and len(items) > 0:
+            validation_issues.append(
+                {
+                    "epic_id": epic_id,
+                    "issue": (
+                        f"{stage_field} has zero coverage "
+                        "but contains evidence"
+                    ),
+                }
             )
 
-            if not pd.isna(total_items) and not pd.isna(covered_items):
-                has_valid_counts = True
-                overall_total += total_items
-                overall_covered += covered_items
+        for item in items:
+            location = item.get("epic_field")
 
-                if covered_items > total_items:
-                    validation_issues.append(
-                        {
-                            "run": run_name,
-                            "epic_id": epic_id,
-                            "issue": (
-                                f"{stage_field}_covered_greater_than_total"
-                            ),
-                        }
-                    )
-            else:
-                validation_issues.append(
-                    {
-                        "run": run_name,
-                        "epic_id": epic_id,
-                        "issue": f"{stage_field}_missing_or_invalid_counts",
-                    }
-                )
+            if location:
+                evidence_locations.add(location)
 
-            field_evidence = evidence.get(stage_field, [])
-
-            if not isinstance(field_evidence, list):
-                validation_issues.append(
-                    {
-                        "run": run_name,
-                        "epic_id": epic_id,
-                        "issue": f"{stage_field}_evidence_not_list",
-                    }
-                )
-                field_evidence = []
-
-            row[f"{stage_field}_evidence_count"] = len(field_evidence)
-
-            for item in field_evidence:
-                if not isinstance(item, dict):
-                    continue
-
-                epic_field = item.get("epic_field")
-                text = item.get("text", "")
-
-                evidence_rows.append(
-                    {
-                        "run": run_name,
-                        "epic_id": epic_id,
-                        "stage_field": stage_field,
-                        "epic_field": epic_field,
-                        "text_length": (
-                            len(text)
-                            if isinstance(text, str)
-                            else np.nan
-                        ),
-                    }
-                )
-
-            if not pd.isna(covered_items):
-                if covered_items > 0 and len(field_evidence) == 0:
-                    validation_issues.append(
-                        {
-                            "run": run_name,
-                            "epic_id": epic_id,
-                            "issue": f"{stage_field}_covered_without_evidence",
-                        }
-                    )
-
-                if covered_items == 0 and len(field_evidence) > 0:
-                    validation_issues.append(
-                        {
-                            "run": run_name,
-                            "epic_id": epic_id,
-                            "issue": f"{stage_field}_evidence_with_zero_covered",
-                        }
-                    )
-
-        row["overall_total"] = (
-            overall_total if has_valid_counts else np.nan
-        )
-        row["overall_covered"] = (
-            overall_covered if has_valid_counts else np.nan
-        )
-        row["overall_coverage"] = safe_coverage(
-            row["overall_covered"],
-            row["overall_total"],
+    for epic_field in epic_fields:
+        expected = epic_field in evidence_locations
+        supplied = bool(
+            locations.get(epic_field, False)
         )
 
-        for epic_field in EPIC_FIELDS:
-            row[f"used_in_{epic_field}"] = locations.get(epic_field)
+        if expected != supplied:
+            validation_issues.append(
+                {
+                    "epic_id": epic_id,
+                    "issue": (
+                        f"Location mismatch for {epic_field}: "
+                        f"expected={expected}, supplied={supplied}"
+                    ),
+                }
+            )
 
-        rows.append(row)
-
-    duplicate_ids = [
-        epic_id
-        for epic_id, count in Counter(epic_ids).items()
-        if count > 1
-    ]
-
-    schema_details[run_name]["duplicate_epic_ids"] = duplicate_ids
-
-
-df = pd.DataFrame(rows)
-evidence_df = pd.DataFrame(evidence_rows)
 issues_df = pd.DataFrame(validation_issues)
 
+print("\n" + "=" * 70)
+print("SECTION 8: EVALUATOR VALIDATION")
+print("=" * 70)
 
-# ============================================================
-# 1. FILE AND SCHEMA INFORMATION
-# ============================================================
-
-print("\n" + "=" * 90)
-print("A. FILE AND SCHEMA INFORMATION")
-print("=" * 90)
-
-print(json.dumps(schema_details, indent=2))
-
-
-# ============================================================
-# 2. DATA QUALITY INFORMATION
-# ============================================================
-
-print("\n" + "=" * 90)
-print("B. DATA QUALITY SUMMARY")
-print("=" * 90)
+print(f"Total records: {len(records)}")
 
 if issues_df.empty:
-    print("No validation issues detected.")
+    print("No structural inconsistencies found.")
 else:
-    issue_summary = (
-        issues_df.groupby(["run", "issue"])
-        .size()
-        .reset_index(name="count")
-    )
-
-    print(issue_summary.to_string(index=False))
-
-
-# ============================================================
-# 3. EPIC ID OVERLAP ACROSS RUNS
-# ============================================================
-
-print("\n" + "=" * 90)
-print("C. EPIC ID OVERLAP")
-print("=" * 90)
-
-id_sets = {
-    run_name: set(
-        df.loc[df["run"] == run_name, "epic_id"]
-    )
-    for run_name in FILES
-}
-
-common_ids = set.intersection(*id_sets.values())
-all_ids = set.union(*id_sets.values())
-
-overlap_summary = {
-    "unique_epics_across_all_runs": len(all_ids),
-    "epics_present_in_all_three_runs": len(common_ids),
-    "epics_missing_from_at_least_one_run": len(all_ids - common_ids),
-    "run_counts": {
-        run_name: len(epic_ids)
-        for run_name, epic_ids in id_sets.items()
-    },
-}
-
-print(json.dumps(overlap_summary, indent=2))
-
-for run_name, epic_ids in id_sets.items():
-    missing = sorted(all_ids - epic_ids)
-
     print(
-        f"\nMissing from {run_name}:",
-        missing[:20],
-        "..." if len(missing) > 20 else "",
+        f"Epics with issues: "
+        f"{issues_df['epic_id'].nunique()}"
+    )
+    print(f"Total issues: {len(issues_df)}")
+    print("\nIssues:")
+    print(issues_df.to_string(index=False))
+
+
+# =========================================================
+# SECTION 9: TOP AND BOTTOM EPICS
+# =========================================================
+
+print("\n" + "=" * 70)
+print("SECTION 9: TOP AND BOTTOM COVERAGE EPICS")
+print("=" * 70)
+
+print("\nHighest-coverage epics:")
+print(
+    overall_df.nlargest(
+        5,
+        "overall_stage_coverage",
+    )[
+        [
+            "epic_id",
+            "overall_stage_coverage",
+            "coverage_bucket",
+        ]
+    ].to_string(index=False)
+)
+
+print("\nLowest-coverage epics:")
+print(
+    overall_df.nsmallest(
+        5,
+        "overall_stage_coverage",
+    )[
+        [
+            "epic_id",
+            "overall_stage_coverage",
+            "coverage_bucket",
+        ]
+    ].to_string(index=False)
+)
+
+
+# =========================================================
+# SAVE ALL MAIN TABLES INTO ONE EXCEL FILE
+# =========================================================
+
+output_file = "stage_coverage_eda.xlsx"
+
+with pd.ExcelWriter(output_file) as writer:
+    overall_df.to_excel(
+        writer,
+        sheet_name="overall_epics",
+        index=False,
     )
 
-
-# ============================================================
-# 4. OVERALL COVERAGE BY RUN
-# ============================================================
-
-print("\n" + "=" * 90)
-print("D. OVERALL COVERAGE BY RUN")
-print("=" * 90)
-
-overall_rows = []
-
-for run_name, group in df.groupby("run"):
-    coverage = group["overall_coverage"].dropna()
-
-    total_items = group["overall_total"].sum()
-    covered_items = group["overall_covered"].sum()
-
-    overall_rows.append(
-        {
-            "run": run_name,
-            "epics": group["epic_id"].nunique(),
-            "total_stage_items": total_items,
-            "covered_stage_items": covered_items,
-            "micro_coverage": (
-                covered_items / total_items
-                if total_items > 0
-                else np.nan
-            ),
-            "mean_epic_coverage": coverage.mean(),
-            "median_epic_coverage": coverage.median(),
-            "std_epic_coverage": coverage.std(ddof=0),
-            "minimum_coverage": coverage.min(),
-            "maximum_coverage": coverage.max(),
-            "zero_coverage_epics": int(
-                np.isclose(coverage, 0).sum()
-            ),
-            "full_coverage_epics": int(
-                np.isclose(coverage, 1).sum()
-            ),
-        }
+    bucket_summary.to_excel(
+        writer,
+        sheet_name="coverage_buckets",
+        index=False,
     )
 
-overall_summary = pd.DataFrame(overall_rows).round(3)
-print(overall_summary.to_string(index=False))
+    field_summary.to_excel(
+        writer,
+        sheet_name="stage_fields",
+        index=False,
+    )
 
+    location_summary.to_excel(
+        writer,
+        sheet_name="usage_locations",
+        index=False,
+    )
 
-# ============================================================
-# 5. COVERAGE BY STAGE FIELD
-# ============================================================
+    pattern_summary.to_excel(
+        writer,
+        sheet_name="location_patterns",
+        index=False,
+    )
 
-print("\n" + "=" * 90)
-print("E. COVERAGE BY STAGE FIELD")
-print("=" * 90)
+    unused_summary.to_excel(
+        writer,
+        sheet_name="unused_fields",
+        index=False,
+    )
 
-field_rows = []
-
-for run_name, group in df.groupby("run"):
-    for stage_field in STAGE_FIELDS:
-        total = group[f"{stage_field}_total"].sum()
-        covered = group[f"{stage_field}_covered"].sum()
-        epic_coverage = group[
-            f"{stage_field}_coverage"
-        ].dropna()
-
-        field_rows.append(
-            {
-                "run": run_name,
-                "stage_field": stage_field,
-                "total_items": total,
-                "covered_items": covered,
-                "micro_coverage": (
-                    covered / total
-                    if total > 0
-                    else np.nan
-                ),
-                "mean_epic_coverage": epic_coverage.mean(),
-                "median_epic_coverage": epic_coverage.median(),
-                "coverage_std": epic_coverage.std(ddof=0),
-                "mean_total_items_per_epic": (
-                    group[f"{stage_field}_total"].mean()
-                ),
-                "epics_where_field_was_used": int(
-                    (
-                        group[f"{stage_field}_covered"] > 0
-                    ).sum()
-                ),
-            }
+    if not mapping_df.empty:
+        mapping_df.to_excel(
+            writer,
+            sheet_name="evidence_mapping",
+            index=False,
         )
 
-field_summary = pd.DataFrame(field_rows).round(3)
-print(field_summary.to_string(index=False))
-
-
-# ============================================================
-# 6. WHERE STAGE INFORMATION APPEARS
-# ============================================================
-
-print("\n" + "=" * 90)
-print("F. STAGE USAGE LOCATIONS")
-print("=" * 90)
-
-location_rows = []
-
-for run_name, group in df.groupby("run"):
-    for epic_field in EPIC_FIELDS:
-        values = group[
-            f"used_in_{epic_field}"
-        ].dropna()
-
-        true_count = sum(value is True for value in values)
-
-        location_rows.append(
-            {
-                "run": run_name,
-                "epic_field": epic_field,
-                "valid_records": len(values),
-                "true_count": true_count,
-                "usage_rate": (
-                    true_count / len(values)
-                    if len(values) > 0
-                    else np.nan
-                ),
-            }
+    if not issues_df.empty:
+        issues_df.to_excel(
+            writer,
+            sheet_name="validation_issues",
+            index=False,
         )
 
-location_summary = pd.DataFrame(location_rows).round(3)
-print(location_summary.to_string(index=False))
-
-
-# ============================================================
-# 7. EVIDENCE DISTRIBUTION
-# ============================================================
-
-print("\n" + "=" * 90)
-print("G. EVIDENCE DISTRIBUTION")
-print("=" * 90)
-
-if evidence_df.empty:
-    print("No evidence records found.")
-else:
-    evidence_summary = (
-        evidence_df.groupby(
-            ["run", "stage_field", "epic_field"],
-            dropna=False,
-        )
-        .agg(
-            evidence_count=("epic_id", "size"),
-            unique_epics=("epic_id", "nunique"),
-            mean_text_length=("text_length", "mean"),
-        )
-        .reset_index()
-        .round(2)
-    )
-
-    print(evidence_summary.to_string(index=False))
-
-
-# ============================================================
-# 8. RUN-TO-RUN CONSISTENCY
-# ============================================================
-
-print("\n" + "=" * 90)
-print("H. RUN-TO-RUN CONSISTENCY")
-print("=" * 90)
-
-common_df = df[df["epic_id"].isin(common_ids)].copy()
-
-coverage_pivot = common_df.pivot_table(
-    index="epic_id",
-    columns="run",
-    values="overall_coverage",
-    aggfunc="first",
-)
-
-coverage_pivot["mean_coverage"] = coverage_pivot.mean(axis=1)
-coverage_pivot["coverage_std"] = coverage_pivot[
-    list(FILES.keys())
-].std(axis=1, ddof=0)
-coverage_pivot["coverage_range"] = (
-    coverage_pivot[list(FILES.keys())].max(axis=1)
-    - coverage_pivot[list(FILES.keys())].min(axis=1)
-)
-
-coverage_pivot["consistency"] = pd.cut(
-    coverage_pivot["coverage_range"],
-    bins=[-0.001, 0.10, 0.25, np.inf],
-    labels=[
-        "stable",
-        "moderate_variation",
-        "unstable",
-    ],
-)
-
-consistency_counts = (
-    coverage_pivot["consistency"]
-    .value_counts(dropna=False)
-    .to_dict()
-)
-
-consistency_summary = {
-    "epics_compared": len(coverage_pivot),
-    "mean_coverage_range": round(
-        coverage_pivot["coverage_range"].mean(),
-        3,
-    ),
-    "median_coverage_range": round(
-        coverage_pivot["coverage_range"].median(),
-        3,
-    ),
-    "maximum_coverage_range": round(
-        coverage_pivot["coverage_range"].max(),
-        3,
-    ),
-    "mean_run_standard_deviation": round(
-        coverage_pivot["coverage_std"].mean(),
-        3,
-    ),
-    "consistency_counts": {
-        str(key): int(value)
-        for key, value in consistency_counts.items()
-    },
-}
-
-print(json.dumps(consistency_summary, indent=2))
-
-
-# ============================================================
-# 9. FIELD-LEVEL CONSISTENCY
-# ============================================================
-
-print("\n" + "=" * 90)
-print("I. FIELD-LEVEL CONSISTENCY")
-print("=" * 90)
-
-field_consistency_rows = []
-
-for stage_field in STAGE_FIELDS:
-    field_coverage_pivot = common_df.pivot_table(
-        index="epic_id",
-        columns="run",
-        values=f"{stage_field}_coverage",
-        aggfunc="first",
-    )
-
-    total_items_pivot = common_df.pivot_table(
-        index="epic_id",
-        columns="run",
-        values=f"{stage_field}_total",
-        aggfunc="first",
-    )
-
-    field_ranges = (
-        field_coverage_pivot.max(axis=1)
-        - field_coverage_pivot.min(axis=1)
-    )
-
-    item_count_ranges = (
-        total_items_pivot.max(axis=1)
-        - total_items_pivot.min(axis=1)
-    )
-
-    field_consistency_rows.append(
-        {
-            "stage_field": stage_field,
-            "mean_coverage_range": field_ranges.mean(),
-            "median_coverage_range": field_ranges.median(),
-            "maximum_coverage_range": field_ranges.max(),
-            "exact_coverage_agreement_rate": (
-                np.isclose(field_ranges, 0).mean()
-            ),
-            "mean_total_item_count_range": (
-                item_count_ranges.mean()
-            ),
-            "exact_total_item_agreement_rate": (
-                np.isclose(item_count_ranges, 0).mean()
-            ),
-        }
-    )
-
-field_consistency_summary = pd.DataFrame(
-    field_consistency_rows
-).round(3)
-
-print(field_consistency_summary.to_string(index=False))
-
-
-# ============================================================
-# 10. MOST INCONSISTENT EPICS
-# ============================================================
-
-print("\n" + "=" * 90)
-print("J. TOP 15 MOST INCONSISTENT EPICS")
-print("=" * 90)
-
-top_inconsistent = (
-    coverage_pivot
-    .sort_values(
-        ["coverage_range", "coverage_std"],
-        ascending=False,
-    )
-    .head(15)
-    .reset_index()
-    .round(3)
-)
-
-print(top_inconsistent.to_string(index=False))
-
-
-# ============================================================
-# 11. LOWEST AND HIGHEST COVERAGE EPICS
-# ============================================================
-
-print("\n" + "=" * 90)
-print("K. LOWEST 10 MEAN-COVERAGE EPICS")
-print("=" * 90)
-
-lowest = (
-    coverage_pivot
-    .sort_values("mean_coverage")
-    .head(10)
-    .reset_index()
-    .round(3)
-)
-
-print(lowest.to_string(index=False))
-
-
-print("\n" + "=" * 90)
-print("L. HIGHEST 10 MEAN-COVERAGE EPICS")
-print("=" * 90)
-
-highest = (
-    coverage_pivot
-    .sort_values("mean_coverage", ascending=False)
-    .head(10)
-    .reset_index()
-    .round(3)
-)
-
-print(highest.to_string(index=False))
+print(f"\nSaved complete analysis to: {output_file}")
