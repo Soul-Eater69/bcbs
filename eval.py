@@ -4,320 +4,519 @@ import os
 import httpx
 from dotenv import load_dotenv
 
+from phoenix.otel import register
 from phoenix.evals import LLM
 from phoenix.evals.metrics import FaithfulnessEvaluator
 
 
+# ============================================================
+# 0. ENV
+# ============================================================
+
 load_dotenv()
 
 
+def required_env(name: str) -> str:
+    value = os.getenv(name)
+
+    if not value:
+        raise RuntimeError(
+            f"Missing environment variable: {name}"
+        )
+
+    return value
+
+
 # ============================================================
-# 1. GET YOUR CORPORATE JWT
+# 1. CONNECT TRACING TO PHOENIX UI
+# ============================================================
+#
+# Evaluator executions will be visible in Phoenix.
+#
+# batch=False is convenient for notebooks/local testing because
+# spans are sent immediately rather than waiting for shutdown.
+# ============================================================
+
+tracer_provider = register(
+    project_name="jira-epic-evaluator-testing",
+    batch=False,
+)
+
+
+# ============================================================
+# 2. IDP TOKEN
 # ============================================================
 
 def get_idp_token() -> str:
+
     headers = {
         "Accept": "*/*",
-        "ClientId": os.environ["IDP_CLIENT_ID"],
-        "ClientSecret": os.environ["IDP_CLIENT_SECRET"],
+        "ClientId": required_env("IDP_CLIENT_ID"),
+        "ClientSecret": required_env("IDP_CLIENT_SECRET"),
         "scope": "profile openid roles permissions",
     }
 
     body = {
-        "username": os.environ["IDP_USER"],
-        "password": os.environ["IDP_PASSWORD"],
+        "username": required_env("IDP_USER"),
+        "password": required_env("IDP_PASSWORD"),
     }
 
     with httpx.Client(
-        verify=False,       # local testing only
+        verify=False,       # LOCAL TEST ONLY
         timeout=30.0,
     ) as client:
 
-        r = client.post(
-            os.environ["IDP_AUTH_URL"],
+        response = client.post(
+            required_env("IDP_AUTH_URL"),
             headers=headers,
             json=body,
         )
 
-        r.raise_for_status()
+        response.raise_for_status()
 
-        token = r.json().get("jwt_token")
+        payload = response.json()
+
+    token = payload.get("jwt_token")
 
     if not token:
         raise RuntimeError(
-            "IDP response missing jwt_token"
+            f"IDP response missing jwt_token: {payload}"
         )
 
     return token
 
 
 # ============================================================
-# 2. VERY SMALL OPENAI -> CORPORATE GATEWAY BRIDGE
+# 3. CUSTOM HTTP CLIENT
+# ============================================================
+#
+# OpenAI SDK normally calls:
+#
+#     POST /chat/completions
+#
+# Your gateway expects:
+#
+#     POST /api/v1/chatcompletions
+#
+# So instead of creating another proxy/server, this custom
+# client translates the OpenAI request locally.
+#
+# Phoenix
+#    ↓
+# OpenAI SDK
+#    ↓
+# GatewayHTTPClient
+#    ↓
+# corporate gateway
+#
 # ============================================================
 
-class GatewayTransport(httpx.BaseTransport):
-    """
-    Phoenix/OpenAI thinks it is calling:
-
-        /api/v1/chat/completions
-
-    Your gateway actually expects:
-
-        /api/v1/chatcompletions
-
-    This transport fixes that locally and also injects:
-      - Bearer JWT
-      - app-id
-      - api_version
-
-    No extra server required.
-    """
+class GatewayHTTPClient(httpx.Client):
 
     def __init__(self):
-        self.transport = httpx.HTTPTransport(
-            verify=False
+
+        # OpenAI requires an httpx.Client instance.
+        super().__init__(
+            timeout=90.0
+        )
+
+        # Actual client used to hit your gateway.
+        self.gateway_client = httpx.Client(
+            verify=False,       # LOCAL TEST ONLY
+            timeout=90.0,
         )
 
         self.token = get_idp_token()
 
-    def _send(
+        self.gateway_url = (
+            required_env("LLM_BASE_URL").rstrip("/")
+            + "/api/v1/chatcompletions"
+        )
+
+    def _call_gateway(
         self,
-        request: httpx.Request,
+        payload: dict,
     ) -> httpx.Response:
 
-        # ------------------------------------------
-        # Fix gateway path
-        # ------------------------------------------
+        headers = {
+            "Authorization": (
+                f"Bearer {self.token}"
+            ),
+            "app-id": required_env("LLM_APP_ID"),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
 
-        path = request.url.path
+        # ----------------------------------------------------
+        # Gateway-specific request fields
+        # ----------------------------------------------------
 
-        path = path.replace(
-            "/chat/completions",
-            "/chatcompletions",
+        payload["model"] = required_env(
+            "LLM_MODEL"
         )
 
-        url = request.url.copy_with(
-            path=path
-        )
-
-        # ------------------------------------------
-        # OpenAI SDK generated JSON body
-        # Keep everything Phoenix sends:
-        # messages, tools, tool_choice, temperature...
-        # ------------------------------------------
-
-        payload = json.loads(
-            request.content.decode("utf-8")
-        )
-
-        # Corporate gateway-specific field
         payload["api_version"] = (
             "2024-04-01-preview"
         )
 
-        # Ensure corporate deployment/model
-        payload["model"] = os.environ[
-            "LLM_MODEL"
-        ]
-
-        # ------------------------------------------
-        # Corporate auth
-        # ------------------------------------------
-
-        headers = dict(
-            request.headers
-        )
-
-        headers["Authorization"] = (
-            f"Bearer {self.token}"
-        )
-
-        headers["app-id"] = os.environ[
-            "LLM_APP_ID"
-        ]
-
-        headers["Content-Type"] = (
-            "application/json"
-        )
-
-        gateway_request = httpx.Request(
-            method=request.method,
-            url=url,
+        response = self.gateway_client.post(
+            self.gateway_url,
             headers=headers,
-            content=json.dumps(payload),
+            json=payload,
         )
 
-        response = self.transport.handle_request(
-            gateway_request
-        )
+        # Token expired/rejected:
+        # refresh once and retry.
+        if response.status_code == 401:
 
-        response.read()
+            self.token = get_idp_token()
+
+            headers["Authorization"] = (
+                f"Bearer {self.token}"
+            )
+
+            response = self.gateway_client.post(
+                self.gateway_url,
+                headers=headers,
+                json=payload,
+            )
 
         return response
 
-    def handle_request(
+    def send(
         self,
         request: httpx.Request,
+        *args,
+        **kwargs,
     ) -> httpx.Response:
 
-        response = self._send(request)
-
-        # Token expired? Refresh once.
-        if response.status_code == 401:
-            self.token = get_idp_token()
-            response = self._send(request)
-
-        # ------------------------------------------
-        # Your gateway code shows it may return
-        # "choice" instead of OpenAI's "choices".
+        # ----------------------------------------------------
+        # Request was produced by OpenAI SDK.
         #
-        # Normalize that for Phoenix/OpenAI.
-        # ------------------------------------------
+        # Example:
+        # {
+        #   "model": ...,
+        #   "messages": ...,
+        #   "tools": ...,
+        #   ...
+        # }
+        #
+        # Preserve ALL fields Phoenix/OpenAI sends.
+        # ----------------------------------------------------
 
         try:
-            payload = response.json()
+            body = request.content.decode(
+                "utf-8"
+            )
 
-            if (
-                "choice" in payload
-                and "choices" not in payload
-            ):
-                payload["choices"] = [
-                    payload.pop("choice")
-                ]
+            payload = json.loads(body)
 
-            return httpx.Response(
-                status_code=response.status_code,
-                headers=response.headers,
-                json=payload,
-                request=request,
+        except Exception as exc:
+
+            raise RuntimeError(
+                "Could not parse OpenAI request body"
+            ) from exc
+
+        # ----------------------------------------------------
+        # Call corporate gateway
+        # ----------------------------------------------------
+
+        response = self._call_gateway(
+            payload
+        )
+
+        # Useful during initial debugging
+        print(
+            "\n[GATEWAY]",
+            response.status_code,
+            self.gateway_url,
+        )
+
+        if response.status_code >= 400:
+
+            print(
+                "[GATEWAY ERROR]",
+                response.text,
+            )
+
+        # ----------------------------------------------------
+        # Read gateway response
+        # ----------------------------------------------------
+
+        try:
+            gateway_payload = (
+                response.json()
             )
 
         except Exception:
 
             return httpx.Response(
                 status_code=response.status_code,
-                headers=response.headers,
                 content=response.content,
+                headers={
+                    "content-type":
+                        response.headers.get(
+                            "content-type",
+                            "text/plain",
+                        )
+                },
                 request=request,
             )
 
+        # ----------------------------------------------------
+        # Your original code showed:
+        #
+        # choice = payload.get("choice")
+        #          or payload["choices"][0]
+        #
+        # OpenAI SDK expects:
+        #
+        # "choices": [...]
+        #
+        # Normalize singular "choice" if your gateway uses it.
+        # ----------------------------------------------------
+
+        if (
+            "choice" in gateway_payload
+            and "choices" not in gateway_payload
+        ):
+
+            gateway_payload["choices"] = [
+                gateway_payload.pop("choice")
+            ]
+
+        # ----------------------------------------------------
+        # OpenAI SDK needs an OpenAI-shaped HTTP response.
+        # ----------------------------------------------------
+
+        return httpx.Response(
+            status_code=response.status_code,
+            json=gateway_payload,
+            headers={
+                "content-type":
+                    "application/json"
+            },
+            request=request,
+        )
+
     def close(self):
-        self.transport.close()
+
+        self.gateway_client.close()
+
+        super().close()
 
 
 # ============================================================
-# 3. GIVE THE CUSTOM HTTP CLIENT TO PHOENIX
+# 4. CREATE THE CUSTOM HTTP CLIENT
 # ============================================================
 
-gateway_http_client = httpx.Client(
-    transport=GatewayTransport(),
-    timeout=90.0,
-)
+gateway_http_client = GatewayHTTPClient()
 
+
+# ============================================================
+# 5. PHOENIX JUDGE MODEL
+# ============================================================
+#
+# IMPORTANT:
+#
+# client="openai"
+#
+# means Phoenix uses the native OpenAI Python SDK.
+# No LangChain involved.
+#
+# base_url itself isn't important to the gateway because our
+# custom httpx client intercepts the outgoing request, but it
+# must still be a valid URL for OpenAI to build its request.
+# ============================================================
 
 judge_llm = LLM(
     provider="openai",
-
-    # Explicit: use OpenAI SDK, NOT LangChain
     client="openai",
 
-    model=os.environ["LLM_MODEL"],
+    model=required_env(
+        "LLM_MODEL"
+    ),
 
-    # OpenAI SDK will append /chat/completions.
-    # Our transport fixes it to /chatcompletions.
+    api_key="unused",
+
     base_url=(
-        os.environ["LLM_BASE_URL"].rstrip("/")
+        required_env(
+            "LLM_BASE_URL"
+        ).rstrip("/")
         + "/api/v1"
     ),
 
-    # OpenAI SDK requires an API key.
-    # GatewayTransport replaces the Authorization header
-    # with your actual IDP JWT.
-    api_key="unused",
-
     sync_client_kwargs={
-        "http_client": gateway_http_client
+        "http_client":
+            gateway_http_client
     },
 )
 
 
 # ============================================================
-# 4. PHOENIX BUILT-IN FAITHFULNESS JUDGE
+# 6. PHOENIX FAITHFULNESS / HALLUCINATION JUDGE
 # ============================================================
 
-faithfulness = FaithfulnessEvaluator(
-    llm=judge_llm,
-    temperature=0.0,
+faithfulness_evaluator = (
+    FaithfulnessEvaluator(
+        llm=judge_llm,
+
+        # Keep judge deterministic during benchmarking.
+        temperature=0.0,
+    )
 )
 
 
 # ============================================================
-# 5. VIEW THE ACTUAL ARIZE PROMPT
+# 7. SHOW EVALUATOR DESCRIPTION / PROMPT
 # ============================================================
-
-print("\n========== PHOENIX PROMPT ==========\n")
 
 print(
-    faithfulness.prompt_template
+    "\n"
+    "========== EVALUATOR ==========\n"
+)
+
+print(
+    faithfulness_evaluator.describe()
+)
+
+
+print(
+    "\n"
+    "========== PHOENIX PROMPT ==========\n"
+)
+
+print(
+    faithfulness_evaluator.prompt_template
 )
 
 
 # ============================================================
-# 6. TEST YOUR THEME -> EPIC
+# 8. TEST DATA
+#
+# THEME = source of truth / context
+# EPIC  = output we're checking for hallucination
 # ============================================================
 
 theme = """
 Theme Name:
 Improve Customer Onboarding
 
-Description:
-Reduce customer onboarding friction and
-automate manual verification.
+Theme Description:
+Reduce customer onboarding friction and automate
+manual verification activities.
 
-Success Criteria:
+Expected Outcomes:
 - Reduce onboarding time by 25%
 - Reduce abandoned registrations
+- Reduce manual verification effort
 """
 
 
+# Deliberately hallucinated example:
+#
+# Theme DOES NOT mention:
+# - facial recognition
+# - AWS Rekognition
+# - 98% accuracy
+#
 epic = """
 Title:
 AI Biometric Customer Verification
 
 Description:
-Implement AWS Rekognition facial recognition
-to automate identity verification.
+Implement facial recognition using AWS Rekognition
+to automate customer identity verification and improve
+the onboarding experience.
 
 Success Criteria:
 - Reduce onboarding time by 25%
 - Facial recognition accuracy must exceed 98%
+- AWS Rekognition integration is completed
 """
 
 
-result = faithfulness.evaluate(
-    {
-        # This is basically the generation task/question
-        "input": (
-            "Generate a Jira Epic from the "
-            "provided Theme."
-        ),
+# ============================================================
+# 9. RUN PHOENIX EVALUATOR
+# ============================================================
 
-        # Source of truth
-        "context": theme,
+evaluation_input = {
 
-        # Thing being judged
-        "output": epic,
-    }
+    # This represents what the generator was asked to do.
+    "input": """
+Generate a Jira Epic from the provided Theme.
+""",
+
+    # Authoritative source
+    "context": theme,
+
+    # Generated Jira Epic
+    "output": epic,
+}
+
+
+scores = faithfulness_evaluator.evaluate(
+    evaluation_input
 )
 
 
-print("\n========== RESULT ==========\n")
+score = scores[0]
 
-score = result[0]
 
-print("Label      :", score.label)
-print("Score      :", score.score)
-print("Explanation:", score.explanation)
+# ============================================================
+# 10. OUTPUT
+# ============================================================
 
+print(
+    "\n"
+    "========== RESULT ==========\n"
+)
+
+print(
+    "Label       :",
+    score.label,
+)
+
+print(
+    "Score       :",
+    score.score,
+)
+
+print(
+    "Explanation :",
+    score.explanation,
+)
+
+print(
+    "Metadata    :",
+    score.metadata,
+)
+
+
+# ============================================================
+# 11. TRACE ID
+# ============================================================
+#
+# Phoenix documents that when evaluator tracing is enabled,
+# evaluation metadata can include the trace_id.
+# ============================================================
+
+if score.metadata:
+
+    trace_id = score.metadata.get(
+        "trace_id"
+    )
+
+    if trace_id:
+
+        print(
+            "\nPhoenix Trace ID:",
+            trace_id,
+        )
+
+
+# ============================================================
+# 12. CLEANUP
+# ============================================================
 
 gateway_http_client.close()
