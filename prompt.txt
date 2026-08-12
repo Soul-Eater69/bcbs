@@ -1,668 +1,258 @@
-# Architecture: Summary-First Retrieval for Idea Cards
+# Jira Theme-to-Epic Faithfulness Evaluator
 
-## Goal
+You are an expert evaluator assessing the **faithfulness of a generated Jira Epic to its source Theme**.
 
-Improve value-stream inference for a new Jira idea card / PPT by moving away from noisy raw historical chunk retrieval and toward a **summary-first retrieval architecture**.
+Your task is to determine whether the generated Epic remains grounded in the information and intent provided by the Theme.
 
-The main problem with the earlier approach is that semantic search over raw historical chunks tends to match broad enterprise-healthcare language across many tickets. That leads to:
+The Theme is the authoritative source of truth.
 
-- too many historical ticket hits,
-- many semantically similar but weakly relevant chunks,
-- large LLM context windows,
-- poor evidence density,
-- unstable value-stream selection.
+## Evaluation Objective
 
-This design introduces:
+Evaluate **faithfulness only**.
 
-1. **New-card semantic summary generation**
-2. **Historical ticket semantic summaries**
-3. **A local LangChain + FAISS summary index**
-4. **Late-stage raw chunk lookup only for shortlisted tickets**
-5. **A cleaner separation between ingestion, projection, indexing, and orchestration**
+Do **not** evaluate:
 
----
+* completeness or coverage of the Theme
+* writing quality
+* usefulness
+* Jira formatting
+* instruction following
+* whether the Epic contains every Theme detail
 
-## High-Level Architecture
+Missing Theme information is a **coverage issue**, not a hallucination issue.
 
-```text
-New Jira Idea Card / PPT
-        |
-        v
-clean + normalize PPT text
-        |
-        v
-generate semantic summary for new card
-        |
-        v
-build retrieval text from semantic summary
-        |
-        v
-search historical ticket summary FAISS index
-        |
-        v
-retrieve top analogous historical tickets
-        |
-        +------------------------------+
-        |                              |
-        v                              v
-retrieve KG / value-stream candidates  optional raw chunk lookup for top tickets only
-        |                              |
-        +--------------+---------------+
-                       |
-                       v
-compact evidence package for LLM
-                       |
-                       v
-final value-stream selection
-```
+An Epic can be incomplete and still be faithful.
 
 ---
 
-## Why This Approach
+## Core Definition
 
-### Problem with raw chunk retrieval
+A generated Epic is **FAITHFUL** when its material claims are:
 
-Earlier retrieval was based on historical raw ticket chunks. That causes weak discrimination because many tickets share generic language such as:
+1. explicitly supported by the Theme;
+2. reasonable paraphrases or summaries of Theme information;
+3. directly implied by the Theme without requiring a new assumption; or
+4. reasonable, implementation-neutral operationalizations of the Theme's stated needs, objectives, or outcomes.
 
-- member
-- provider
-- product
-- engagement
-- workflow
-- digital
-- solution
-- growth
-
-The vector retriever therefore tends to pull:
-
-- many tickets,
-- many chunks from the same broad domain,
-- weakly differentiated evidence.
-
-### Why summaries help
-
-A semantic summary compresses raw ticket/PPT content into a clearer business representation:
-
-- what the initiative is,
-- which actors are involved,
-- what functions are directly affected,
-- what downstream processes are implied,
-- what the business goal is.
-
-This produces better retrieval because the embedding reflects **intent and business semantics**, not just shared jargon.
+A generated Epic is **UNFAITHFUL** when it introduces one or more **material claims that are not supported by, reasonably implied by, or safely derived from the Theme**, or when it contradicts the Theme.
 
 ---
 
-## Core Design Principles
+## Allowed Transformations
 
-### 1. Summaries for retrieval
-Use semantic summaries as the primary representation for retrieving analog historical tickets.
+Do **not** mark an Epic unfaithful merely because it does any of the following:
 
-### 2. Raw chunks for verification
-Keep raw chunks, but only use them later:
+### Paraphrasing
 
-- for evidence display,
-- for traceability,
-- for verifying borderline candidates,
-- for final compact grounding.
+The Epic may express the same idea using different words.
 
-### 3. Small, dense prompts
-The LLM should not receive 15 tickets and 32 chunks. It should receive:
+Example:
 
-- the new card semantic summary,
-- shortlisted value-stream candidates,
-- top historical analog summaries,
-- a few carefully selected raw snippets only if needed.
+Theme:
+"Improve access to reporting information."
 
-### 4. Decouple pipeline layers
-Ingestion, transformation, indexing, and batch orchestration should be separate.
+Epic:
+"Make reporting information easier for users to access."
 
----
+This is FAITHFUL.
 
-## End-to-End Flow
+### Summarization
 
-## Step 1: New Card Summary Generation
+The Epic may combine multiple Theme statements into a shorter description while preserving their meaning.
 
-Input:
-- cleaned PPT / Jira card text
+### Decomposition
 
-Output:
-- a structured semantic summary JSON
+A broad Theme requirement may be expressed as a narrower Epic objective when that objective is clearly part of the Theme's scope.
 
-This summary should capture:
+### Reasonable Operationalization
 
-- short summary
-- business goal
-- actors
-- direct functions
-- implied functions
-- change types
-- domain tags
-- evidence sentences
+The Epic may convert Theme-level needs into actionable or Jira-style language as long as it does not introduce a new factual assumption.
 
-### Example
+Example:
 
-```json
-{
-  "doc_id": "NEW_CARD__summary",
-  "short_summary": "Launch of a new employer/member health advocacy offering focused on navigation, engagement, and care coordination.",
-  "business_goal": "launch a new healthcare offering",
-  "actors": ["member", "provider", "employer"],
-  "direct_functions": [
-    "product offering",
-    "engagement",
-    "care coordination"
-  ],
-  "implied_functions": [
-    "provider setup",
-    "pricing",
-    "billing",
-    "IT enablement"
-  ],
-  "change_types": [
-    "new product launch",
-    "operational rollout"
-  ],
-  "domain_tags": [
-    "health advocacy",
-    "navigation",
-    "member experience"
-  ],
-  "evidence_sentences": [
-    "launch a new employer/member health advocacy solution",
-    "improve navigation and care coordination"
-  ]
-}
-```
+Theme:
+"Users need access to images and written content."
+
+Epic:
+"Enable users to access both image and written content."
+
+This is FAITHFUL.
+
+### Success-Criteria Reformulation
+
+Theme requirements or outcomes may be rewritten as Epic success criteria.
+
+Example:
+
+Theme:
+"Users should be able to view account history."
+
+Epic success criterion:
+"Users can view their account history."
+
+This is FAITHFUL.
+
+The wording does not need to appear verbatim in the Theme.
 
 ---
 
-## Step 2: Build Retrieval Text
+## Unsupported Additions
 
-The retriever often expects a single string query, not structured JSON.
+Mark the Epic **UNFAITHFUL** when it introduces substantive information that cannot reasonably be derived from the Theme.
 
-So we convert the summary into a packed retrieval string.
+Pay particular attention to invented:
 
-### Example retrieval text
+* numerical targets, percentages, thresholds, or quantities;
+* dates, deadlines, schedules, or release timelines;
+* technologies, frameworks, platforms, or implementation approaches;
+* named applications, databases, APIs, systems, vendors, or integrations;
+* teams, owners, personas, roles, or stakeholders;
+* dependencies on systems or projects;
+* business rules or policy requirements;
+* capabilities outside the Theme's stated scope;
+* compliance or regulatory requirements;
+* data sources not identified or implied by the Theme;
+* new functional or non-functional requirements;
+* assumptions presented as established facts;
+* claims that contradict the Theme.
 
-```text
-title: Employer/member advocacy launch
-Launch of a new employer/member health advocacy offering focused on navigation, engagement, and care coordination.
-business goal: launch a new healthcare offering
-actors: member, provider, employer
-direct functions: product offering, engagement, care coordination
-implied functions: provider setup, pricing, billing, IT enablement
-change types: new product launch, operational rollout
-domain tags: health advocacy, navigation, member experience
-evidence: launch a new employer/member health advocacy solution | improve navigation and care coordination
-```
+Example:
 
-This is the text embedded and used for similarity search.
+Theme:
+"Improve the customer verification process."
 
----
+Epic:
+"Implement biometric verification using AWS Rekognition with 98% accuracy."
 
-## Step 3: Historical Ticket Summary Generation
-
-For each historical ticket, create a semantic summary using ticket-level information rather than raw chunk-level retrieval.
-
-Input sources per ticket may include:
-
-- title / summary
-- description
-- comments
-- attachment text
-- existing generated summary
-- known mapped value streams
-
-### Historical summary example
-
-```json
-{
-  "doc_id": "IDMT-19761__summary",
-  "ticket_id": "IDMT-19761",
-  "title": "Employer/member advocacy launch",
-  "short_summary": "Launch of a new member advocacy and navigation offering requiring provider coordination and operational support.",
-  "business_goal": "launch a member-facing healthcare product",
-  "actors": ["member", "provider"],
-  "direct_functions": [
-    "product offering",
-    "member engagement",
-    "provider coordination"
-  ],
-  "implied_functions": [
-    "pricing",
-    "enrollment",
-    "IT support"
-  ],
-  "change_types": ["new product launch"],
-  "domain_tags": ["advocacy", "navigation", "member experience"],
-  "evidence_sentences": [
-    "new advocacy solution for members",
-    "provider coordination required for rollout"
-  ],
-  "value_stream_labels": [
-    "Establish Product Offering",
-    "Perform Engagement"
-  ]
-}
-```
+This is UNFAITHFUL because the Theme does not support the claims about biometric verification, AWS Rekognition, or the 98% accuracy threshold.
 
 ---
 
-## Step 4: Build Historical Summary FAISS Index
+## Important Boundary: Specificity Alone Is Not Hallucination
 
-### Storage choice
-For local experimentation, use:
+Do not classify an Epic as unfaithful simply because it is more detailed than the Theme.
 
-- **LangChain FAISS**
-- **1536-dimensional embeddings**
-- local persistence on disk
+Ask whether the additional detail introduces a **new substantive fact or requirement**.
 
-### Why FAISS here
+For example:
 
-- fast local semantic search
-- easy experimentation
-- avoids Azure indexing while architecture is still evolving
-- simple integration with LangChain retrievers later
+Theme:
+"Improve the claims approval workflow."
 
-### Vector representation
+Epic:
+"Streamline the claims approval process."
 
-Each historical summary document is converted into retrieval text and embedded into a 1536-dimensional vector.
+FAITHFUL.
 
-### Index contents
+But:
 
-Each FAISS record corresponds to one historical ticket summary.
+Epic:
+"Use voice biometrics to automate claims approval."
 
-The document content stored in the vector store is the `retrieval_text`.
+UNFAITHFUL unless voice biometrics is supported by the Theme.
 
-Metadata contains the structured fields for later inspection and downstream use.
+The distinction is:
 
----
+**clarification or operationalization of existing meaning → allowed**
 
-## Proposed Summary Index Schema
-
-## A. Summary document schema
-
-```json
-{
-  "doc_id": "IDMT-19761__summary",
-  "ticket_id": "IDMT-19761",
-  "title": "Employer/member advocacy launch",
-  "short_summary": "Launch of a new member advocacy and navigation offering requiring provider coordination and operational support.",
-  "business_goal": "launch a member-facing healthcare product",
-  "actors": ["member", "provider"],
-  "direct_functions": [
-    "product offering",
-    "member engagement",
-    "provider coordination"
-  ],
-  "implied_functions": [
-    "pricing",
-    "enrollment",
-    "IT support"
-  ],
-  "change_types": ["new product launch"],
-  "domain_tags": ["advocacy", "navigation", "member experience"],
-  "evidence_sentences": [
-    "new advocacy solution for members",
-    "provider coordination required for rollout"
-  ],
-  "value_stream_labels": [
-    "Establish Product Offering",
-    "Perform Engagement"
-  ],
-  "retrieval_text": "...packed retrieval text..."
-}
-```
-
-## B. LangChain `Document`
-
-```python
-Document(
-    page_content=retrieval_text,
-    metadata={
-        "doc_id": "IDMT-19761__summary",
-        "ticket_id": "IDMT-19761",
-        "title": "Employer/member advocacy launch",
-        "short_summary": "...",
-        "business_goal": "...",
-        "actors": [...],
-        "direct_functions": [...],
-        "implied_functions": [...],
-        "change_types": [...],
-        "domain_tags": [...],
-        "evidence_sentences": [...],
-        "value_stream_labels": [...],
-        "doc_type": "ticket_summary",
-    }
-)
-```
-
-## C. Local persisted files
-
-Suggested local folder:
-
-```text
-local_ticket_summary_faiss/
-  index.faiss
-  index.pkl
-  summary_docs.json
-```
-
-Optional extra debug files:
-
-```text
-local_ticket_summary_faiss/
-  summary_docs.json
-  query_debug.json
-  top_hits.json
-```
+**new factual assumption, requirement, technology, target, actor, dependency, or scope → unsupported**
 
 ---
 
-## Query Path with the New Index
+## Generic Jira Language
 
-### Query flow
+Generic planning or Jira-style language is not itself hallucination if it does not create a new substantive requirement.
 
-1. Clean the new PPT / card text
-2. Generate new-card semantic summary
-3. Build retrieval text from summary
-4. Query local FAISS summary index
-5. Retrieve top `k` historical tickets
-6. Use these as analog evidence
-7. Only then fetch raw chunks for a few top tickets if necessary
+For example:
 
-### Result shape
+"Implement the necessary changes to support the described workflow."
 
-```json
-[
-  {
-    "rank": 1,
-    "score": 0.82,
-    "ticket_id": "IDMT-19761",
-    "title": "Employer/member advocacy launch",
-    "short_summary": "Launch of a new member advocacy and navigation offering...",
-    "actors": ["member", "provider"],
-    "direct_functions": [
-      "product offering",
-      "member engagement",
-      "provider coordination"
-    ],
-    "implied_functions": ["pricing", "enrollment", "IT support"],
-    "value_stream_labels": [
-      "Establish Product Offering",
-      "Perform Engagement"
-    ]
-  }
-]
-```
+may be acceptable.
+
+However:
+
+"Deploy a new PostgreSQL database to support the workflow."
+
+introduces a specific implementation decision and is UNFAITHFUL unless supported by the Theme.
 
 ---
 
-## How Raw Chunks Still Fit
+## Contradictions
 
-Raw chunks are still useful, but they move to a later stage.
+An Epic is UNFAITHFUL if it materially contradicts the Theme, even if the Epic otherwise discusses the correct topic.
 
-### Raw chunks should be used for:
+Example:
 
-- evidence verification
-- UI citation / traceability
-- borderline candidate validation
-- final support snippet extraction
+Theme:
+"Updates occur quarterly."
 
-### Raw chunks should not be used for:
+Epic:
+"Updates will occur every week."
 
-- first-pass analog retrieval
-- large prompt stuffing
-- broad history-first reasoning
-
-### Final pattern
-
-- summary index = primary analog retrieval
-- raw chunk data = optional evidence lookup for shortlisted tickets only
+UNFAITHFUL.
 
 ---
 
-## Value-Stream Inference with This Design
+## Evaluation Procedure
 
-The final value-stream selection should not depend on historical chunk retrieval alone.
+Evaluate the Epic using the following process:
 
-Instead, combine:
+1. Identify the material claims made by the Epic.
+2. For each material claim, determine whether it is:
 
-1. **new-card semantic summary**
-2. **candidate value-stream definitions / KG retrieval**
-3. **historical analog summaries from FAISS**
-4. **optional small raw evidence snippets**
+   * explicitly supported;
+   * reasonably implied;
+   * a safe paraphrase or operationalization;
+   * unsupported; or
+   * contradictory.
+3. Ignore omissions; they belong to coverage evaluation.
+4. Ignore purely stylistic or organizational differences.
+5. Determine whether any **material unsupported or contradictory claim** remains.
+6. Assign the final label.
 
-This gives the LLM a compact and higher-quality evidence package.
+Use the Theme as the only authoritative evidence.
 
-### Final LLM input should look like:
-
-- new card semantic summary
-- shortlisted value-stream candidates
-- top historical analog ticket summaries
-- a few raw evidence lines only when needed
-
-Not:
-
-- full PPT text
-- 15 historical tickets
-- 32 raw chunks
+Do not rely on outside knowledge to justify information that is absent from the Theme.
 
 ---
 
-## Recommended Pipeline Refactor
+## Decision Rule
 
-The current implementation has useful logic, but it is tightly coupled.
+Return **faithful** when all material claims in the Epic are supported, reasonably implied, or are safe operationalizations of the Theme.
 
-### Current coupling issues
+Return **unfaithful** when at least one material claim introduces unsupported substantive information or materially contradicts the Theme.
 
-The current summary/index file does all of the following in one place:
+Do not mark an Epic unfaithful merely because support is not word-for-word.
 
-- creates Jira client
-- creates LLM client
-- creates embedding client
-- builds config
-- calls ingestion
-- writes debug JSON
-- returns retrieval text
-- builds and queries FAISS
+At the same time, do not assume that a plausible detail is supported simply because it would make sense in the real world.
 
-The pipeline file also mixes:
-
-- runtime setup
-- config construction
-- record transformation
-- output persistence
-- async batch orchestration
-
-This makes reuse hard.
+**Plausible is not the same as grounded.**
 
 ---
 
-## Proposed Layered Refactor
+## Evaluation Data
 
-## 1. `runtime/` layer
-Responsible for environment and client creation.
+<generation_instruction>
+{input}
+</generation_instruction>
 
-Examples:
+<theme>
+{context}
+</theme>
 
-- `build_config()`
-- `build_llm_client()`
-- `build_embedding_client()`
-- `create_memory_indexes()`
-
-## 2. `services/ingestion_service.py`
-Responsible only for calling ingestion.
-
-Example responsibility:
-
-```python
-result = await ingest_one_ticket(ticket_id, deps, cfg)
-```
-
-## 3. `projections/` layer
-Pure transformation logic.
-
-Examples:
-
-- `build_chunk_record(result)`
-- `build_valuestream_record(result)`
-- `extract_retrieval_text(result)`
-- `build_ticket_summary_input(result)`
-
-## 4. `indexes/summary_faiss.py`
-Responsible only for:
-
-- converting summary docs to LangChain Documents
-- building the FAISS store
-- saving/loading the FAISS store
-- searching the FAISS store
-
-## 5. `jobs/batch_ingest.py`
-Thin orchestration only.
-
-Responsibilities:
-
-- iterate tickets
-- call ingestion service
-- project outputs
-- persist outputs
-- log progress
+<generated_epic>
+{output}
+</generated_epic>
 
 ---
 
-## Proposed Module Layout
+## Final Classification
 
-```text
-jira_ingestion/
-  runtime/
-    factories.py
-    config_builder.py
-  services/
-    ingestion_service.py
-  projections/
-    chunk_projection.py
-    valuestream_projection.py
-    summary_projection.py
-  indexes/
-    summary_faiss.py
-  jobs/
-    batch_ingest.py
-```
+Classify the generated Epic as exactly one of:
 
----
+* `faithful`
+* `unfaithful`
 
-## Summary Projection Design
+Base the classification only on the rules above.
 
-A new `summary_projection.py` should own the bridge from raw ingestion result to summary indexing.
-
-### Responsibilities
-
-- extract ticket-level source text from ingestion result
-- generate semantic summary
-- normalize summary JSON
-- build retrieval text
-- return a summary doc ready for FAISS indexing
-
-### Example output
-
-```json
-{
-  "doc_id": "IDMT-19761__summary",
-  "ticket_id": "IDMT-19761",
-  "title": "Employer/member advocacy launch",
-  "short_summary": "Launch of a new member advocacy and navigation offering requiring provider coordination and operational support.",
-  "business_goal": "launch a member-facing healthcare product",
-  "actors": ["member", "provider"],
-  "direct_functions": [
-    "product offering",
-    "member engagement",
-    "provider coordination"
-  ],
-  "implied_functions": [
-    "pricing",
-    "enrollment",
-    "IT support"
-  ],
-  "change_types": ["new product launch"],
-  "domain_tags": ["advocacy", "navigation", "member experience"],
-  "evidence_sentences": [
-    "new advocacy solution for members",
-    "provider coordination required for rollout"
-  ],
-  "value_stream_labels": [
-    "Establish Product Offering",
-    "Perform Engagement"
-  ],
-  "retrieval_text": "..."
-}
-```
-
----
-
-## Suggested Implementation Sequence
-
-### Phase 1: New card summary generation
-- generate semantic summary for new PPT / idea card
-- build retrieval text
-- test summary quality manually
-
-### Phase 2: Historical summary generation
-- create summary docs for historical tickets
-- persist summary docs locally
-
-### Phase 3: Local FAISS index
-- build LangChain FAISS index using summary docs
-- query it using the new-card summary retrieval text
-- inspect top hits
-
-### Phase 4: Raw evidence integration
-- for top 3–5 historical ticket hits only,
-- fetch 1–2 best raw chunks if needed
-
-### Phase 5: Final LLM evidence package
-- combine:
-  - new-card summary,
-  - value-stream candidates,
-  - top historical analog summaries,
-  - few raw snippets
-
----
-
-## What Success Looks Like
-
-Compared to the previous raw-chunk retrieval approach, the improved system should show:
-
-- fewer historical ticket matches,
-- more believable top analog tickets,
-- smaller final LLM prompts,
-- higher evidence density,
-- better distinction between direct and indirect value-stream support.
-
----
-
-## Final Recommendation
-
-### Keep
-- ingestion logic
-- chunk record builders
-- value-stream mapping logic
-- raw chunk persistence
-
-### Add
-- new-card semantic summary generation
-- historical ticket summary generation
-- LangChain FAISS summary index
-- summary projection layer
-
-### Change
-- stop using raw historical chunks as the primary analog retrieval surface
-- use raw chunks only after shortlisting historical tickets
-- decouple ingestion from indexing and orchestration
-
----
-
-## One-Line Mental Model
-
-**Summaries retrieve. Raw chunks verify. The LLM adjudicates on compact evidence, not on a flood of historical text.**
+In the explanation, briefly identify the decisive evidence. If the Epic is unfaithful, identify the specific unsupported or contradictory claim(s). If it is faithful, explain why any additional wording is a supported paraphrase, implication, or safe operationalization rather than a new factual claim.
