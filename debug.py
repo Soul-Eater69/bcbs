@@ -1,19 +1,14 @@
 # ============================================================
-# AUTO-RESUME UNTIL COMPLETE
+# RUN 2
+# GENERATED EPIC vs context@5
 #
-# - Starts from case 36
-# - Uses EXISTING framework_async + existing Excel workbook
-# - Runs one case at a time
-# - On Azure/PTU 429:
-#       wait AT LEAST 180 seconds
-#       retry same case
-#       repeat until success
-# - Then automatically moves to next case
-#
-# IMPORTANT:
-# DO NOT recreate framework_async in this cell.
-# It must be the existing framework instance that already
-# contains the Excel writer/workbook with cases 30-35 saved.
+# - Uses EXISTING framework_async
+# - Therefore appends to the SAME Excel workbook as Run 1
+# - Evaluates Coverage + Faithfulness
+# - Runs cases 1 -> 50 one at a time
+# - Azure/PTU 429 => wait 3 minutes => retry SAME case
+# - Keeps retrying operational errors until success
+# - Real code/config errors still stop immediately
 # ============================================================
 
 import asyncio
@@ -21,13 +16,17 @@ import time
 import traceback
 from datetime import datetime
 
+import numpy as np
+
+from idp_eval import EvaluationCase
+
 from phoenix.evals.rate_limiters import (
     RateLimitError as PhoenixRateLimitError,
 )
 
 
 # ============================================================
-# OPTIONAL OPENAI / HTTPX OPERATIONAL ERROR TYPES
+# OPTIONAL OPENAI ERROR TYPES
 # ============================================================
 
 try:
@@ -54,26 +53,196 @@ except ImportError:
 # CONFIG
 # ============================================================
 
-START_CASE = 36
-STOP_CASE = len(cases)
+START_CASE = 1
 
-# Azure said retry-after: 30,
-# but we deliberately wait longer for PTU recovery.
-RATE_LIMIT_WAIT_SECONDS = 180       # 3 minutes
+RUN_NAME = "generated_epic_vs_context_at_5"
+DATASET_NAME = "epic_gen.parquet"
 
-# For temporary connectivity/timeouts/5xx.
-OTHER_OPERATIONAL_WAIT_SECONDS = 60
-
-# Small buffer if Azure ever gives a retry-after > our default.
+RATE_LIMIT_WAIT_SECONDS = 180        # 3 minutes
+OTHER_OPERATIONAL_WAIT_SECONDS = 60  # timeout / connection / temporary 5xx
 RETRY_AFTER_BUFFER_SECONDS = 5
 
 
-RUN_NAME = "generated_epic_vs_theme_text"
-DATASET_NAME = "epic_gen.parquet"
+# ============================================================
+# CONVERT NUMPY / PARQUET VALUES TO NORMAL PYTHON VALUES
+# ============================================================
+
+def to_python(value):
+
+    if isinstance(value, np.ndarray):
+        return [
+            to_python(v)
+            for v in value.tolist()
+        ]
+
+    if isinstance(value, np.generic):
+        return value.item()
+
+    if isinstance(value, dict):
+        return {
+            str(k): to_python(v)
+            for k, v in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [
+            to_python(v)
+            for v in value
+        ]
+
+    return value
 
 
 # ============================================================
-# RATE-LIMIT INFORMATION CAPTURED FROM REAL AZURE RESPONSES
+# VALIDATE DATA
+# ============================================================
+
+if "context@5" not in df.columns:
+    raise KeyError(
+        "Required column 'context@5' was not found in df."
+    )
+
+
+if len(df) != len(cases):
+    raise ValueError(
+        f"df has {len(df)} rows but cases has {len(cases)} cases. "
+        "They must align row-for-row before Run 2."
+    )
+
+
+# ============================================================
+# BUILD RUN 2 CASES
+#
+# IMPORTANT:
+# Output stays EXACTLY the same as Run 1.
+# Only authoritative context changes:
+#
+# Run 1:
+#     context = theme_text
+#
+# Run 2:
+#     context = context@5
+# ============================================================
+
+context5_cases = []
+
+
+for position, (_, row) in enumerate(df.iterrows()):
+
+    original_case = cases[position]
+
+    context_value = to_python(
+        row["context@5"]
+    )
+
+    context5_case = EvaluationCase(
+
+        # Keep same original task/input
+        input=original_case.input,
+
+        # ====================================================
+        # RUN 2 AUTHORITATIVE CONTEXT
+        # ====================================================
+
+        context={
+            "context_at_5": context_value
+        },
+
+        # ====================================================
+        # SAME GENERATED EPIC AS RUN 1
+        # ====================================================
+
+        output=original_case.output,
+
+        instructions=original_case.instructions,
+
+        # Keep same case ID so Run 1 / Run 2 can be compared
+        case_id=original_case.case_id,
+
+        metadata=(
+            dict(original_case.metadata)
+            if original_case.metadata is not None
+            else None
+        ),
+
+        retrieved_documents=(
+            original_case.retrieved_documents
+        ),
+
+        evaluation_scope=(
+            original_case.evaluation_scope
+        ),
+    )
+
+    context5_cases.append(
+        context5_case
+    )
+
+
+STOP_CASE = len(context5_cases)
+
+
+# ============================================================
+# SANITY CHECK
+# ============================================================
+
+print("=" * 90)
+print("RUN 2 SETUP")
+print("=" * 90)
+
+print(
+    "Run name       :",
+    RUN_NAME,
+)
+
+print(
+    "Dataset        :",
+    DATASET_NAME,
+)
+
+print(
+    "Total cases    :",
+    len(context5_cases),
+)
+
+print(
+    "First case ID  :",
+    context5_cases[0].case_id,
+)
+
+print(
+    "Last case ID   :",
+    context5_cases[-1].case_id,
+)
+
+
+# ============================================================
+# VERIFY WHICH EXCEL FILE framework_async IS USING
+# ============================================================
+
+print("\nExisting framework writers:")
+
+for writer in framework_async._writers:
+
+    print(
+        " -",
+        type(writer).__name__,
+        getattr(
+            writer,
+            "_path",
+            None,
+        ),
+    )
+
+
+print(
+    "\nIMPORTANT: this run uses the EXISTING framework_async "
+    "and therefore the same Excel workbook."
+)
+
+
+# ============================================================
+# RATE-LIMIT STATE
 # ============================================================
 
 rate_limit_state = {
@@ -86,20 +255,24 @@ rate_limit_state = {
 
 
 # ============================================================
-# GET EXISTING ASYNC OPENAI CLIENT
+# GET EXISTING ASYNC AZURE/OPENAI HTTP CLIENT
 # ============================================================
 
 llm = judge._llm
 
-async_openai_client = llm._async_client
-async_httpx_client = async_openai_client._client
+async_openai_client = (
+    llm._async_client
+)
+
+async_httpx_client = (
+    async_openai_client._client
+)
 
 
 # ============================================================
-# HTTP HOOK
+# HTTP RESPONSE HOOK
 #
-# Captures the ORIGINAL Azure 429 before Phoenix converts it
-# into its own RateLimitError.
+# Captures original Azure 429 BEFORE Phoenix wraps it.
 # ============================================================
 
 async def capture_rate_limit_info(response):
@@ -107,63 +280,105 @@ async def capture_rate_limit_info(response):
     if response.status_code != 429:
         return
 
-    rate_limit_state["status_code"] = 429
-    rate_limit_state["last_429_at"] = time.time()
+    rate_limit_state[
+        "status_code"
+    ] = 429
+
+    rate_limit_state[
+        "last_429_at"
+    ] = time.time()
+
 
     # --------------------------------------------------------
-    # retry-after
+    # RETRY-AFTER
     # --------------------------------------------------------
 
-    retry_after_raw = response.headers.get("retry-after")
+    retry_after_raw = (
+        response.headers.get(
+            "retry-after"
+        )
+    )
 
     retry_after_seconds = None
 
     if retry_after_raw is not None:
+
         try:
-            retry_after_seconds = float(retry_after_raw)
-        except (TypeError, ValueError):
+            retry_after_seconds = float(
+                retry_after_raw
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
             retry_after_seconds = None
 
-    rate_limit_state["retry_after_seconds"] = (
-        retry_after_seconds
-    )
+
+    rate_limit_state[
+        "retry_after_seconds"
+    ] = retry_after_seconds
+
 
     # --------------------------------------------------------
-    # request ID
+    # REQUEST ID
     # --------------------------------------------------------
 
     request_id = (
-        response.headers.get("x-request-id")
-        or response.headers.get("apim-request-id")
-        or response.headers.get("request-id")
+        response.headers.get(
+            "x-request-id"
+        )
+        or response.headers.get(
+            "apim-request-id"
+        )
+        or response.headers.get(
+            "request-id"
+        )
     )
 
-    rate_limit_state["request_id"] = request_id
+    rate_limit_state[
+        "request_id"
+    ] = request_id
+
 
     # --------------------------------------------------------
-    # Read Azure response body
+    # RESPONSE BODY
     # --------------------------------------------------------
 
     try:
+
         await response.aread()
+
         body = response.text
+
     except Exception:
+
         body = ""
 
-    rate_limit_state["message"] = body[:2000]
+
+    rate_limit_state[
+        "message"
+    ] = body[:2000]
+
 
     # --------------------------------------------------------
-    # Concise logging
+    # LOG
     # --------------------------------------------------------
 
     print("\n")
     print("!" * 90)
-    print("AZURE 429 THROTTLE CAPTURED")
+
+    print(
+        "AZURE 429 THROTTLE CAPTURED"
+    )
+
     print("!" * 90)
 
     print(
         "time        :",
-        datetime.now().strftime("%H:%M:%S"),
+        datetime.now().strftime(
+            "%H:%M:%S"
+        ),
     )
 
     print(
@@ -171,45 +386,66 @@ async def capture_rate_limit_info(response):
         retry_after_raw,
     )
 
+
     if request_id:
+
         print(
             "request-id  :",
             request_id,
         )
 
-    if "Provisioned-Managed" in body:
+
+    if (
+        "Provisioned-Managed"
+        in body
+    ):
+
         print(
             "reason      : "
             "Provisioned-Managed throughput exceeded"
         )
 
     elif body:
+
         print(
             "body        :",
             body[:800],
         )
 
+
     print("!" * 90)
 
 
 # ============================================================
-# REMOVE OLD COPIES OF OUR HOOK
+# REMOVE OLD DEBUG HOOKS
 #
-# Also remove previous diagnostic hook from the earlier cell
-# so we don't print every response twice.
+# Prevent duplicate output if previous Run 1 cell installed
+# earlier versions of these hooks.
 # ============================================================
 
 existing_hooks = (
-    async_httpx_client.event_hooks.setdefault(
+    async_httpx_client
+    .event_hooks
+    .setdefault(
         "response",
         [],
     )
 )
 
-async_httpx_client.event_hooks["response"] = [
+
+async_httpx_client.event_hooks[
+    "response"
+] = [
+
     hook
+
     for hook in existing_hooks
-    if getattr(hook, "__name__", "")
+
+    if getattr(
+        hook,
+        "__name__",
+        "",
+    )
     not in {
         "capture_rate_limit_info",
         "capture_retry_after",
@@ -217,36 +453,55 @@ async_httpx_client.event_hooks["response"] = [
     }
 ]
 
-async_httpx_client.event_hooks["response"].append(
+
+async_httpx_client.event_hooks[
+    "response"
+].append(
     capture_rate_limit_info
 )
 
+
 print(
-    "Rate-limit hook installed:",
+    "\nHTTP response hooks:",
     [
-        getattr(h, "__name__", str(h))
-        for h
-        in async_httpx_client.event_hooks["response"]
+        getattr(
+            hook,
+            "__name__",
+            str(hook),
+        )
+        for hook
+        in async_httpx_client
+        .event_hooks["response"]
     ],
 )
 
 
 # ============================================================
-# BUILD OPERATIONAL EXCEPTION TYPES
+# BUILD OPERATIONAL ERROR TYPES
 # ============================================================
 
 operational_types = [
     PhoenixRateLimitError,
 ]
 
+
 for exc_type in (
+
     OpenAIRateLimitError,
     APITimeoutError,
     APIConnectionError,
     InternalServerError,
+
 ):
-    if isinstance(exc_type, type):
-        operational_types.append(exc_type)
+
+    if isinstance(
+        exc_type,
+        type,
+    ):
+
+        operational_types.append(
+            exc_type
+        )
 
 
 if httpx is not None:
@@ -260,72 +515,115 @@ if httpx is not None:
 
 
 OPERATIONAL_TYPES = tuple(
-    set(operational_types)
+    set(
+        operational_types
+    )
 )
 
 
 # ============================================================
-# CHECK EXCEPTION CHAIN
+# FIND OPERATIONAL ERROR IN EXCEPTION CHAIN
 # ============================================================
 
 def find_operational_error(exc):
 
     current = exc
+
     seen = set()
+
 
     while (
         current is not None
         and id(current) not in seen
     ):
 
-        seen.add(id(current))
+        seen.add(
+            id(current)
+        )
+
 
         if isinstance(
             current,
             OPERATIONAL_TYPES,
         ):
+
             return current
 
-        if current.__cause__ is not None:
-            current = current.__cause__
+
+        if (
+            current.__cause__
+            is not None
+        ):
+
+            current = (
+                current.__cause__
+            )
+
         else:
-            current = current.__context__
+
+            current = (
+                current.__context__
+            )
+
 
     return None
 
 
 # ============================================================
-# DETERMINE WAIT TIME
+# RATE-LIMIT TYPE HELPER
+# ============================================================
+
+rate_limit_types = [
+    PhoenixRateLimitError,
+]
+
+
+if isinstance(
+    OpenAIRateLimitError,
+    type,
+):
+
+    rate_limit_types.append(
+        OpenAIRateLimitError
+    )
+
+
+RATE_LIMIT_TYPES = tuple(
+    rate_limit_types
+)
+
+
+# ============================================================
+# DETERMINE COOLDOWN
 # ============================================================
 
 def get_wait_seconds(exc):
 
-    operational_error = find_operational_error(exc)
-
-    # --------------------------------------------------------
-    # Rate limit / 429
-    # --------------------------------------------------------
-
-    is_rate_limit = isinstance(
-        operational_error,
-        tuple(
-            t
-            for t in (
-                PhoenixRateLimitError,
-                OpenAIRateLimitError
-                if isinstance(
-                    OpenAIRateLimitError,
-                    type,
-                )
-                else None,
-            )
-            if isinstance(t, type)
-        ),
+    operational_error = (
+        find_operational_error(
+            exc
+        )
     )
+
+
+    is_rate_limit = (
+
+        operational_error
+        is not None
+
+        and isinstance(
+            operational_error,
+            RATE_LIMIT_TYPES,
+        )
+
+    )
+
 
     if (
         is_rate_limit
-        or rate_limit_state["status_code"] == 429
+        or rate_limit_state[
+            "status_code"
+        ] == 429
     ):
 
         azure_retry_after = (
@@ -334,14 +632,19 @@ def get_wait_seconds(exc):
             ]
         )
 
-        # Always wait AT LEAST 3 minutes.
+
+        # Always wait at least 3 minutes
         wait_seconds = (
             RATE_LIMIT_WAIT_SECONDS
         )
 
-        # If Azure ever asks for MORE than 3 minutes,
-        # respect the longer value.
-        if azure_retry_after is not None:
+
+        # If Azure requests MORE than 3 minutes,
+        # respect Azure's longer value.
+        if (
+            azure_retry_after
+            is not None
+        ):
 
             wait_seconds = max(
                 wait_seconds,
@@ -349,15 +652,14 @@ def get_wait_seconds(exc):
                 + RETRY_AFTER_BUFFER_SECONDS,
             )
 
+
         return (
             wait_seconds,
             "rate_limit",
         )
 
-    # --------------------------------------------------------
-    # Timeout / connection / temporary 5xx
-    # --------------------------------------------------------
 
+    # Timeout / connection / temporary provider failure
     return (
         OTHER_OPERATIONAL_WAIT_SECONDS,
         "temporary_provider_error",
@@ -365,51 +667,79 @@ def get_wait_seconds(exc):
 
 
 # ============================================================
-# MAIN AUTO-RESUME LOOP
+# START RUN 2
 # ============================================================
 
 print("\n")
 print("#" * 90)
 
 print(
-    f"AUTO-RESUME RUN: "
-    f"CASE {START_CASE} → CASE {STOP_CASE}"
+    "RUN 2: GENERATED EPIC vs context@5"
 )
 
 print(
-    f"Rate-limit cooldown: "
-    f"{RATE_LIMIT_WAIT_SECONDS} seconds"
+    f"CASES {START_CASE} → {STOP_CASE}"
 )
 
 print(
-    "Runs one case at a time and retries operational "
-    "failures until successful."
+    "Metrics: coverage + faithfulness"
+)
+
+print(
+    f"PTU throttle cooldown: "
+    f"{RATE_LIMIT_WAIT_SECONDS}s "
+    f"({RATE_LIMIT_WAIT_SECONDS / 60:.1f} minutes)"
+)
+
+print(
+    "Operational failures will retry automatically "
+    "until the case succeeds."
 )
 
 print("#" * 90)
 
 
-overall_started = time.perf_counter()
+overall_started = (
+    time.perf_counter()
+)
 
 completed_this_run = 0
+
 total_retries = 0
 
+
+# ============================================================
+# CASE LOOP
+# ============================================================
 
 for human_case_number in range(
     START_CASE,
     STOP_CASE + 1,
 ):
 
-    case_index = human_case_number - 1
-    case = cases[case_index]
+    case_index = (
+        human_case_number - 1
+    )
+
+    case = (
+        context5_cases[
+            case_index
+        ]
+    )
+
 
     attempt = 0
+
 
     while True:
 
         attempt += 1
 
-        # Reset response info for this attempt.
+
+        # ----------------------------------------------------
+        # RESET HTTP STATE FOR THIS ATTEMPT
+        # ----------------------------------------------------
+
         rate_limit_state[
             "retry_after_seconds"
         ] = None
@@ -431,39 +761,47 @@ for human_case_number in range(
         print("=" * 90)
 
         print(
+            f"RUN 2 | "
             f"CASE {human_case_number}"
             f"/{STOP_CASE}"
             f" | attempt {attempt}"
         )
 
         print(
-            f"case_id: {case.case_id}"
+            f"case_id: "
+            f"{case.case_id}"
         )
 
         print("=" * 90)
 
 
-        started = time.perf_counter()
+        started = (
+            time.perf_counter()
+        )
 
 
         try:
 
             # =================================================
-            # ONE CASE AT A TIME
+            # RUN ONE CASE
             #
-            # Once BOTH metrics succeed, a_evaluate()
-            # publishes this case to the existing Excel writer.
+            # max_concurrency=1:
+            # only one judge request active at a time.
+            #
+            # Coverage then Faithfulness.
             # =================================================
 
-            result = await framework_async.a_evaluate(
-                case,
-                metrics=[
-                    "coverage",
-                    "faithfulness",
-                ],
-                run_name=RUN_NAME,
-                dataset_name=DATASET_NAME,
-                max_concurrency=1,
+            result = (
+                await framework_async.a_evaluate(
+                    case,
+                    metrics=[
+                        "coverage",
+                        "faithfulness",
+                    ],
+                    run_name=RUN_NAME,
+                    dataset_name=DATASET_NAME,
+                    max_concurrency=1,
+                )
             )
 
 
@@ -473,41 +811,50 @@ for human_case_number in range(
             )
 
 
-            coverage = result[
-                "coverage"
-            ]
+            coverage = (
+                result["coverage"]
+            )
 
-            faithfulness = result[
-                "faithfulness"
-            ]
+            faithfulness = (
+                result[
+                    "faithfulness"
+                ]
+            )
 
 
             completed_this_run += 1
 
 
+            # =================================================
+            # SUCCESS
+            # =================================================
+
             print("\n")
             print("✓" * 45)
 
             print(
-                f"✓ CASE {human_case_number} COMPLETE"
+                f"✓ RUN 2 CASE "
+                f"{human_case_number} COMPLETE"
             )
 
             print(
-                f"attempts       : {attempt}"
+                f"attempts       : "
+                f"{attempt}"
             )
 
             print(
-                f"elapsed        : {elapsed:.1f}s"
+                f"elapsed        : "
+                f"{elapsed:.1f}s"
             )
 
             print(
-                f"coverage       : "
+                "coverage       : "
                 f"{coverage.score} "
                 f"({coverage.label})"
             )
 
             print(
-                f"faithfulness   : "
+                "faithfulness   : "
                 f"{faithfulness.score} "
                 f"({faithfulness.label})"
             )
@@ -516,10 +863,15 @@ for human_case_number in range(
                 "✓ persisted to existing Excel workbook"
             )
 
+            print(
+                f"✓ run_name = {RUN_NAME}"
+            )
+
             print("✓" * 45)
 
 
-            # Success -> move to next case.
+            # Success.
+            # Move automatically to next case.
             break
 
 
@@ -532,45 +884,57 @@ for human_case_number in range(
 
 
             operational_error = (
-                find_operational_error(exc)
+                find_operational_error(
+                    exc
+                )
             )
 
 
             # =================================================
-            # REAL BUG / CONFIG / PERSISTENCE ERROR
+            # NON-OPERATIONAL ERROR
             #
-            # Never infinitely retry these.
+            # DO NOT RETRY PROGRAMMING / CONFIG / DATA BUGS.
             # =================================================
 
-            if operational_error is None:
+            if (
+                operational_error
+                is None
+            ):
 
                 print("\n")
                 print("X" * 90)
 
                 print(
-                    f"NON-OPERATIONAL ERROR "
-                    f"ON CASE {human_case_number}"
+                    "NON-OPERATIONAL ERROR"
                 )
 
                 print(
-                    f"type    : "
+                    f"Run 2 case : "
+                    f"{human_case_number}"
+                )
+
+                print(
+                    f"case_id    : "
+                    f"{case.case_id}"
+                )
+
+                print(
+                    f"type        : "
                     f"{type(exc).__name__}"
                 )
 
                 print(
-                    f"message : {exc}"
+                    f"message     : "
+                    f"{exc}"
                 )
 
                 print(
-                    "This does NOT look like a temporary "
-                    "provider failure."
-                )
-
-                print(
-                    "Stopping instead of retrying a bug forever."
+                    "Stopping instead of "
+                    "retrying a real bug forever."
                 )
 
                 print("X" * 90)
+
 
                 traceback.print_exc()
 
@@ -578,27 +942,33 @@ for human_case_number in range(
 
 
             # =================================================
-            # TEMPORARY OPERATIONAL FAILURE
+            # TEMPORARY PROVIDER FAILURE
             # =================================================
 
             total_retries += 1
 
+
             (
                 wait_seconds,
                 failure_kind,
-            ) = get_wait_seconds(exc)
+            ) = get_wait_seconds(
+                exc
+            )
 
 
             print("\n")
             print("!" * 90)
 
             print(
-                f"⚠ CASE {human_case_number} "
-                f"ATTEMPT {attempt} FAILED TEMPORARILY"
+                f"⚠ RUN 2 CASE "
+                f"{human_case_number} "
+                f"ATTEMPT {attempt} "
+                f"FAILED TEMPORARILY"
             )
 
             print(
-                f"kind        : {failure_kind}"
+                f"kind        : "
+                f"{failure_kind}"
             )
 
             print(
@@ -612,7 +982,8 @@ for human_case_number in range(
             )
 
             print(
-                f"elapsed     : {elapsed:.1f}s"
+                f"elapsed     : "
+                f"{elapsed:.1f}s"
             )
 
 
@@ -656,48 +1027,52 @@ for human_case_number in range(
 
 
             # =================================================
-            # COUNTDOWN
+            # COOLDOWN COUNTDOWN
             # =================================================
 
             remaining = int(
                 wait_seconds
             )
 
+
             while remaining > 0:
 
-                # Print once per minute,
-                # plus final 30 seconds.
                 if (
                     remaining % 60 == 0
                     or remaining <= 30
                 ):
 
                     print(
-                        f"Retrying case "
+                        f"Retrying Run 2 case "
                         f"{human_case_number} "
                         f"in {remaining}s..."
                     )
+
 
                 sleep_for = min(
                     30,
                     remaining,
                 )
 
+
                 await asyncio.sleep(
                     sleep_for
                 )
 
-                remaining -= sleep_for
+
+                remaining -= (
+                    sleep_for
+                )
 
 
             print(
-                f"\nRetrying case "
+                f"\nRetrying Run 2 case "
                 f"{human_case_number} now..."
             )
 
 
 # ============================================================
-# FINISHED
+# RUN 2 FINISHED
 # ============================================================
 
 overall_elapsed = (
@@ -710,27 +1085,36 @@ print("\n")
 print("#" * 90)
 
 print(
-    f"✓ ALL CASES "
-    f"{START_CASE}–{STOP_CASE} COMPLETE"
+    "✓ RUN 2 COMPLETE"
 )
 
 print(
-    f"completed this run : "
+    f"✓ Cases "
+    f"{START_CASE}–{STOP_CASE} complete"
+)
+
+print(
+    f"completed cases   : "
     f"{completed_this_run}"
 )
 
 print(
-    f"temporary retries  : "
+    f"temporary retries : "
     f"{total_retries}"
 )
 
 print(
-    f"total elapsed      : "
+    f"total elapsed     : "
     f"{overall_elapsed / 60:.1f} minutes"
 )
 
 print(
-    "✓ Results persisted to the existing Excel workbook."
+    f"run_name          : "
+    f"{RUN_NAME}"
+)
+
+print(
+    "✓ Results persisted to the SAME existing Excel workbook."
 )
 
 print("#" * 90)
