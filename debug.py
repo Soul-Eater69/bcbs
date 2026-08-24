@@ -1,162 +1,191 @@
-from pathlib import Path
-
-import pandas as pd
+import time
+from datetime import datetime
+import traceback
 
 from idp_eval import (
-    CoverageEvaluator,
-    EvaluationCase,
     EvaluationFramework,
+    CoverageEvaluator,
     FaithfulnessEvaluator,
 )
 
 
-# ============================================================
-# 1. LOAD DATA
-# ============================================================
+# ------------------------------------------------------------
+# 1. Attach diagnostic hook to EXISTING Azure/OpenAI client
+# ------------------------------------------------------------
 
-PARQUET_PATH = Path("../epic_gen.parquet")
+llm = judge._llm
+openai_client = llm._sync_client
+httpx_client = openai_client._client
 
-df = pd.read_parquet(PARQUET_PATH).fillna("")
-
-print("Rows:", len(df))
-
-
-# ============================================================
-# 2. BUILD EVALUATION CASES
-#
-# FIRST RUN:
-# context = theme_text
-# output  = generated Epic from context@5 generation
-# ============================================================
-
-cases = []
-
-for row_index, row in df.iterrows():
-
-    # Prefer UUID because projectKey may repeat across rows.
-    case_id = str(row.get("uuid", row_index))
-
-    case = EvaluationCase(
-        case_id=case_id,
-
-        # Authoritative source for this first experiment
-        context={
-            "theme_text": row.get("theme_text", ""),
-        },
-
-        # Generated Epic being evaluated
-        output={
-            "epic_title": row.get(
-                "gen_epic_title_context@5",
-                "",
-            ),
-            "epic_description": row.get(
-                "gen_epic_description_context@5",
-                "",
-            ),
-            "epic_success_criteria": row.get(
-                "gen_epic_successCriteria_context@5",
-                "",
-            ),
-        },
-    )
-
-    cases.append(case)
+state = {
+    "http_attempt": 0,
+    "last_response_time": None,
+}
 
 
-print("Evaluation cases:", len(cases))
+def trace_http_response(response):
+    state["http_attempt"] += 1
+    attempt = state["http_attempt"]
+
+    now = time.time()
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+    if state["last_response_time"] is None:
+        gap = None
+    else:
+        gap = now - state["last_response_time"]
+
+    state["last_response_time"] = now
+
+    print("\n" + "=" * 80)
+    print(f"HTTP RESPONSE #{attempt}")
+    print(f"time       : {timestamp}")
+    print(f"status     : {response.status_code}")
+
+    if gap is not None:
+        print(f"since prior response: {gap:.2f}s")
+
+    # Only print rate-limit / request-id diagnostics.
+    interesting_headers = {}
+
+    for key, value in response.headers.items():
+        k = key.lower()
+
+        if (
+            "retry" in k
+            or "ratelimit" in k
+            or "rate-limit" in k
+            or "request-id" in k
+            or "request_id" in k
+            or k.startswith("x-ms-")
+        ):
+            interesting_headers[key] = value
+
+    print("\nRelevant headers:")
+
+    if interesting_headers:
+        for key, value in interesting_headers.items():
+            print(f"  {key}: {value}")
+    else:
+        print("  <none>")
+
+    # Body is useful only on failures.
+    if response.status_code >= 400:
+        try:
+            response.read()
+            body = response.text
+        except Exception as body_exc:
+            body = f"<unable to read body: {body_exc}>"
+
+        print("\nResponse body:")
+        print(body[:5000])
+
+    print("=" * 80)
 
 
-# ============================================================
-# 3. FRAMEWORK
-# ============================================================
+# Avoid adding the same hook twice if this cell gets rerun.
+hooks = httpx_client.event_hooks.setdefault("response", [])
 
-framework = EvaluationFramework(
+if trace_http_response not in hooks:
+    hooks.append(trace_http_response)
+
+
+# ------------------------------------------------------------
+# 2. Diagnostic framework — NO Excel, NO persistence
+# ------------------------------------------------------------
+
+debug_framework = EvaluationFramework(
     judge=judge,
     evaluators=[
-        CoverageEvaluator,
-        FaithfulnessEvaluator,
+        CoverageEvaluator(verbose=True),
+        FaithfulnessEvaluator(verbose=True),
     ],
-    output="excel",
-    excel_path="theme_text_vs_generated_epic.xlsx",
 )
 
 
-# ============================================================
-# 4. RUN EVALUATION
-# ============================================================
+# ------------------------------------------------------------
+# 3. Run CASE 28 only
+# Python index 27 = human case 28
+# ------------------------------------------------------------
 
-results = framework.evaluate_many(
-    cases,
-    metrics=[
-        "coverage",
-        "faithfulness",
-    ],
-    run_name="generated_epic_vs_theme_text",
-    dataset_name="epic_gen.parquet",
+case_number = 28
+case = cases[case_number - 1]
 
-    # Use this if your progress-bar change is already in your branch.
-    show_progress=True,
-)
+print("\n" + "#" * 80)
+print(f"STARTING CASE {case_number}")
+print(f"case_id: {case.case_id}")
+print("#" * 80)
 
+started = time.perf_counter()
 
-# ============================================================
-# 5. BUILD SIMPLE RESULTS DATAFRAME
-# ============================================================
-
-rows = []
-
-for case, result in zip(cases, results):
-
-    coverage = result["coverage"]
-    faithfulness = result["faithfulness"]
-
-    rows.append(
-        {
-            "case_id": case.case_id,
-
-            "coverage_score": coverage.score,
-            "coverage_label": coverage.label,
-            "coverage_explanation": coverage.explanation,
-
-            "faithfulness_score": faithfulness.score,
-            "faithfulness_label": faithfulness.label,
-            "faithfulness_explanation": faithfulness.explanation,
-
-            # Optional explicit hallucination rate
-            "hallucination_rate": (
-                None
-                if faithfulness.score is None
-                else 1.0 - faithfulness.score
-            ),
-        }
+try:
+    result = debug_framework.evaluate(
+        case,
+        metrics=["coverage", "faithfulness"],
+        run_name="rate-limit-debug",
+        dataset_name="epic_gen_case_28_debug",
     )
 
+    elapsed = time.perf_counter() - started
 
-evaluation_df = pd.DataFrame(rows)
+    print("\n✓ CASE COMPLETED")
+    print(f"elapsed: {elapsed:.2f}s")
 
-display(evaluation_df)
+    for metric, metric_result in result.items():
+        print(
+            f"{metric}: "
+            f"score={metric_result.score} "
+            f"label={metric_result.label}"
+        )
 
+except Exception as exc:
+    elapsed = time.perf_counter() - started
 
-# ============================================================
-# 6. OVERALL AVERAGES
-# ============================================================
+    print("\n" + "!" * 80)
+    print("CASE FAILED")
+    print(f"elapsed: {elapsed:.2f}s")
+    print(f"final exception: {type(exc).__name__}")
+    print(f"message: {exc}")
+    print("!" * 80)
 
-print()
-print("OVERALL RESULTS")
-print("=" * 70)
+    print("\nEXCEPTION CHAIN:")
 
-print(
-    "Average Coverage:",
-    evaluation_df["coverage_score"].mean(),
-)
+    current = exc
+    level = 0
+    seen = set()
 
-print(
-    "Average Faithfulness:",
-    evaluation_df["faithfulness_score"].mean(),
-)
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
 
-print(
-    "Average Hallucination Rate:",
-    evaluation_df["hallucination_rate"].mean(),
-)
+        print(
+            f"\n[{level}] "
+            f"{type(current).__module__}."
+            f"{type(current).__name__}"
+        )
+        print(str(current))
+
+        for attr in (
+            "status_code",
+            "request_id",
+            "code",
+            "type",
+            "param",
+            "current_rate_tokens_per_sec",
+            "initial_rate_tokens_per_sec",
+            "enforcement_window_seconds",
+        ):
+            value = getattr(current, attr, None)
+
+            if value is not None:
+                print(f"  {attr}: {value}")
+
+        next_exc = current.__cause__
+
+        if next_exc is None:
+            next_exc = current.__context__
+
+        current = next_exc
+        level += 1
+
+    print("\nTRACEBACK:")
+    traceback.print_exc()
