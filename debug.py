@@ -1,59 +1,92 @@
 # ============================================================
-# ASYNC + EXCEL PERSISTENCE + AZURE RATE-LIMIT DIAGNOSTICS
+# AUTO-RESUME UNTIL COMPLETE
 #
-# - Resumes from case 28
-# - Coverage + Faithfulness
-# - verbose=True
-# - 2 concurrent judge calls
-# - Saves successful batches to Excel
-# - Prints actual Azure/OpenAI 429 responses
-# - DOES NOT add/change retry logic
+# - Starts from case 36
+# - Uses EXISTING framework_async + existing Excel workbook
+# - Runs one case at a time
+# - On Azure/PTU 429:
+#       wait AT LEAST 180 seconds
+#       retry same case
+#       repeat until success
+# - Then automatically moves to next case
+#
+# IMPORTANT:
+# DO NOT recreate framework_async in this cell.
+# It must be the existing framework instance that already
+# contains the Excel writer/workbook with cases 30-35 saved.
 # ============================================================
 
+import asyncio
 import time
 import traceback
 from datetime import datetime
 
-from idp_eval import (
-    EvaluationFramework,
-    CoverageEvaluator,
-    FaithfulnessEvaluator,
+from phoenix.evals.rate_limiters import (
+    RateLimitError as PhoenixRateLimitError,
 )
+
+
+# ============================================================
+# OPTIONAL OPENAI / HTTPX OPERATIONAL ERROR TYPES
+# ============================================================
+
+try:
+    from openai import (
+        RateLimitError as OpenAIRateLimitError,
+        APITimeoutError,
+        APIConnectionError,
+        InternalServerError,
+    )
+except ImportError:
+    OpenAIRateLimitError = None
+    APITimeoutError = None
+    APIConnectionError = None
+    InternalServerError = None
+
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-START_CASE = 28
+START_CASE = 36
 STOP_CASE = len(cases)
 
-# Two cases are submitted concurrently.
-# Because each case has Coverage + Faithfulness,
-# the framework semaphore ensures at most 2 judge calls
-# are in flight at once.
-MAX_CONCURRENCY = 2
+# Azure said retry-after: 30,
+# but we deliberately wait longer for PTU recovery.
+RATE_LIMIT_WAIT_SECONDS = 180       # 3 minutes
 
-# Keep the persistence batch small.
-# If a batch gets a 429, only this small batch needs rerunning.
-BATCH_SIZE = 2
+# For temporary connectivity/timeouts/5xx.
+OTHER_OPERATIONAL_WAIT_SECONDS = 60
 
-EXCEL_PATH = "theme_text_vs_generated_epic_resume_28_50.xlsx"
+# Small buffer if Azure ever gives a retry-after > our default.
+RETRY_AFTER_BUFFER_SECONDS = 5
+
 
 RUN_NAME = "generated_epic_vs_theme_text"
 DATASET_NAME = "epic_gen.parquet"
 
 
-print("Cases available :", len(cases))
-print("Starting at     :", START_CASE)
-print("Stopping at     :", STOP_CASE)
-print("Concurrency     :", MAX_CONCURRENCY)
-print("Batch size      :", BATCH_SIZE)
-print("Excel output    :", EXCEL_PATH)
+# ============================================================
+# RATE-LIMIT INFORMATION CAPTURED FROM REAL AZURE RESPONSES
+# ============================================================
+
+rate_limit_state = {
+    "retry_after_seconds": None,
+    "status_code": None,
+    "message": None,
+    "request_id": None,
+    "last_429_at": None,
+}
 
 
 # ============================================================
-# 1. GET EXISTING ASYNC OPENAI HTTP CLIENT
+# GET EXISTING ASYNC OPENAI CLIENT
 # ============================================================
 
 llm = judge._llm
@@ -63,202 +96,181 @@ async_httpx_client = async_openai_client._client
 
 
 # ============================================================
-# 2. HTTP TRACE STATE
-# ============================================================
-
-trace_state = {
-    "total_responses": 0,
-    "successful_responses": 0,
-    "error_responses": 0,
-    "rate_limit_responses": 0,
-    "last_error_time": None,
-}
-
-
-# ============================================================
-# 3. ASYNC HTTP RESPONSE HOOK
+# HTTP HOOK
 #
-# We keep successful 200s quiet.
-# On 429 / other failures we print:
-#   - timestamp
-#   - HTTP status
-#   - retry headers
-#   - rate-limit headers
-#   - request IDs
-#   - Azure response body
-#
-# This does NOT retry anything.
+# Captures the ORIGINAL Azure 429 before Phoenix converts it
+# into its own RateLimitError.
 # ============================================================
 
-async def trace_async_http_response(response):
+async def capture_rate_limit_info(response):
 
-    trace_state["total_responses"] += 1
-
-    status = response.status_code
-
-    if status < 400:
-        trace_state["successful_responses"] += 1
+    if response.status_code != 429:
         return
 
-    trace_state["error_responses"] += 1
+    rate_limit_state["status_code"] = 429
+    rate_limit_state["last_429_at"] = time.time()
 
-    if status == 429:
-        trace_state["rate_limit_responses"] += 1
+    # --------------------------------------------------------
+    # retry-after
+    # --------------------------------------------------------
 
-    now = time.time()
-    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    retry_after_raw = response.headers.get("retry-after")
 
-    previous_error = trace_state["last_error_time"]
+    retry_after_seconds = None
 
-    if previous_error is None:
-        error_gap = None
-    else:
-        error_gap = now - previous_error
+    if retry_after_raw is not None:
+        try:
+            retry_after_seconds = float(retry_after_raw)
+        except (TypeError, ValueError):
+            retry_after_seconds = None
 
-    trace_state["last_error_time"] = now
+    rate_limit_state["retry_after_seconds"] = (
+        retry_after_seconds
+    )
+
+    # --------------------------------------------------------
+    # request ID
+    # --------------------------------------------------------
+
+    request_id = (
+        response.headers.get("x-request-id")
+        or response.headers.get("apim-request-id")
+        or response.headers.get("request-id")
+    )
+
+    rate_limit_state["request_id"] = request_id
+
+    # --------------------------------------------------------
+    # Read Azure response body
+    # --------------------------------------------------------
+
+    try:
+        await response.aread()
+        body = response.text
+    except Exception:
+        body = ""
+
+    rate_limit_state["message"] = body[:2000]
+
+    # --------------------------------------------------------
+    # Concise logging
+    # --------------------------------------------------------
 
     print("\n")
     print("!" * 90)
-    print("HTTP ERROR RESPONSE")
+    print("AZURE 429 THROTTLE CAPTURED")
     print("!" * 90)
 
-    print(f"time          : {timestamp}")
-    print(f"status        : {status}")
+    print(
+        "time        :",
+        datetime.now().strftime("%H:%M:%S"),
+    )
 
-    try:
-        print(f"method        : {response.request.method}")
-        print(f"url           : {response.request.url}")
-    except Exception:
-        pass
+    print(
+        "retry-after :",
+        retry_after_raw,
+    )
 
-    if error_gap is not None:
+    if request_id:
         print(
-            f"since previous error response: "
-            f"{error_gap:.2f}s"
+            "request-id  :",
+            request_id,
         )
 
-    # --------------------------------------------------------
-    # Interesting Azure / OpenAI headers
-    # --------------------------------------------------------
-
-    interesting_headers = {}
-
-    for key, value in response.headers.items():
-
-        k = key.lower()
-
-        if (
-            "retry" in k
-            or "ratelimit" in k
-            or "rate-limit" in k
-            or "request-id" in k
-            or "request_id" in k
-            or k.startswith("x-ms-")
-        ):
-            interesting_headers[key] = value
-
-    print("\nRelevant headers:")
-
-    if interesting_headers:
-
-        for key, value in interesting_headers.items():
-            print(f"  {key}: {value}")
-
-    else:
-        print("  <none>")
-
-
-    # --------------------------------------------------------
-    # Read failure body
-    # --------------------------------------------------------
-
-    try:
-
-        await response.aread()
-
-        body = response.text
-
-    except Exception as body_exc:
-
-        body = (
-            "<unable to read response body: "
-            f"{type(body_exc).__name__}: {body_exc}>"
+    if "Provisioned-Managed" in body:
+        print(
+            "reason      : "
+            "Provisioned-Managed throughput exceeded"
         )
 
-    print("\nResponse body:")
-    print(body[:5000])
+    elif body:
+        print(
+            "body        :",
+            body[:800],
+        )
 
     print("!" * 90)
-    print()
 
 
 # ============================================================
-# 4. REMOVE OLD ASYNC TRACE HOOK COPIES
+# REMOVE OLD COPIES OF OUR HOOK
 #
-# Important in Jupyter because rerunning the cell creates
-# a new function object.
+# Also remove previous diagnostic hook from the earlier cell
+# so we don't print every response twice.
 # ============================================================
 
-existing_hooks = async_httpx_client.event_hooks.setdefault(
-    "response",
-    [],
+existing_hooks = (
+    async_httpx_client.event_hooks.setdefault(
+        "response",
+        [],
+    )
 )
 
 async_httpx_client.event_hooks["response"] = [
     hook
     for hook in existing_hooks
-    if getattr(
-        hook,
-        "__name__",
-        "",
-    ) != "trace_async_http_response"
+    if getattr(hook, "__name__", "")
+    not in {
+        "capture_rate_limit_info",
+        "capture_retry_after",
+        "trace_async_http_response",
+    }
 ]
 
 async_httpx_client.event_hooks["response"].append(
-    trace_async_http_response
+    capture_rate_limit_info
 )
 
-matching_hooks = [
-    getattr(hook, "__name__", str(hook))
-    for hook in async_httpx_client.event_hooks["response"]
-    if getattr(
-        hook,
-        "__name__",
-        "",
-    ) == "trace_async_http_response"
+print(
+    "Rate-limit hook installed:",
+    [
+        getattr(h, "__name__", str(h))
+        for h
+        in async_httpx_client.event_hooks["response"]
+    ],
+)
+
+
+# ============================================================
+# BUILD OPERATIONAL EXCEPTION TYPES
+# ============================================================
+
+operational_types = [
+    PhoenixRateLimitError,
 ]
 
-print("\nDiagnostic async hooks:", matching_hooks)
+for exc_type in (
+    OpenAIRateLimitError,
+    APITimeoutError,
+    APIConnectionError,
+    InternalServerError,
+):
+    if isinstance(exc_type, type):
+        operational_types.append(exc_type)
 
 
-# ============================================================
-# 5. CREATE PERSISTED FRAMEWORK
-#
-# IMPORTANT:
-# This DOES write successful evaluations to Excel.
-# ============================================================
+if httpx is not None:
 
-framework_async = EvaluationFramework(
-    judge=judge,
-    evaluators=[
-        CoverageEvaluator(verbose=True),
-        FaithfulnessEvaluator(verbose=True),
-    ],
-    output="excel",
-    excel_path=EXCEL_PATH,
+    operational_types.extend(
+        [
+            httpx.TimeoutException,
+            httpx.TransportError,
+        ]
+    )
+
+
+OPERATIONAL_TYPES = tuple(
+    set(operational_types)
 )
 
 
 # ============================================================
-# 6. EXCEPTION CHAIN PRINTER
+# CHECK EXCEPTION CHAIN
 # ============================================================
 
-def print_exception_chain(exc):
-
-    print("\nEXCEPTION CHAIN:")
+def find_operational_error(exc):
 
     current = exc
-    level = 0
     seen = set()
 
     while (
@@ -268,313 +280,457 @@ def print_exception_chain(exc):
 
         seen.add(id(current))
 
-        print("\n" + "-" * 90)
+        if isinstance(
+            current,
+            OPERATIONAL_TYPES,
+        ):
+            return current
 
-        print(
-            f"[{level}] "
-            f"{type(current).__module__}."
-            f"{type(current).__name__}"
+        if current.__cause__ is not None:
+            current = current.__cause__
+        else:
+            current = current.__context__
+
+    return None
+
+
+# ============================================================
+# DETERMINE WAIT TIME
+# ============================================================
+
+def get_wait_seconds(exc):
+
+    operational_error = find_operational_error(exc)
+
+    # --------------------------------------------------------
+    # Rate limit / 429
+    # --------------------------------------------------------
+
+    is_rate_limit = isinstance(
+        operational_error,
+        tuple(
+            t
+            for t in (
+                PhoenixRateLimitError,
+                OpenAIRateLimitError
+                if isinstance(
+                    OpenAIRateLimitError,
+                    type,
+                )
+                else None,
+            )
+            if isinstance(t, type)
+        ),
+    )
+
+    if (
+        is_rate_limit
+        or rate_limit_state["status_code"] == 429
+    ):
+
+        azure_retry_after = (
+            rate_limit_state[
+                "retry_after_seconds"
+            ]
         )
 
-        print(f"message: {current}")
-
-        attrs = (
-            "status_code",
-            "request_id",
-            "code",
-            "type",
-            "param",
-            "current_rate_tokens_per_sec",
-            "initial_rate_tokens_per_sec",
-            "enforcement_window_seconds",
+        # Always wait AT LEAST 3 minutes.
+        wait_seconds = (
+            RATE_LIMIT_WAIT_SECONDS
         )
 
-        for attr in attrs:
+        # If Azure ever asks for MORE than 3 minutes,
+        # respect the longer value.
+        if azure_retry_after is not None:
 
-            value = getattr(
-                current,
-                attr,
-                None,
+            wait_seconds = max(
+                wait_seconds,
+                azure_retry_after
+                + RETRY_AFTER_BUFFER_SECONDS,
             )
 
-            if value is not None:
-                print(f"{attr}: {value}")
+        return (
+            wait_seconds,
+            "rate_limit",
+        )
 
-        next_exc = current.__cause__
+    # --------------------------------------------------------
+    # Timeout / connection / temporary 5xx
+    # --------------------------------------------------------
 
-        if next_exc is None:
-            next_exc = current.__context__
-
-        current = next_exc
-        level += 1
+    return (
+        OTHER_OPERATIONAL_WAIT_SECONDS,
+        "temporary_provider_error",
+    )
 
 
 # ============================================================
-# 7. CASES TO RUN
-#
-# case 28 => Python index 27
+# MAIN AUTO-RESUME LOOP
 # ============================================================
-
-resume_cases = cases[
-    START_CASE - 1 : STOP_CASE
-]
 
 print("\n")
 print("#" * 90)
+
 print(
-    f"ASYNC PERSISTED RUN: "
+    f"AUTO-RESUME RUN: "
     f"CASE {START_CASE} → CASE {STOP_CASE}"
 )
-print("#" * 90)
 
 print(
-    f"Remaining cases: {len(resume_cases)}"
+    f"Rate-limit cooldown: "
+    f"{RATE_LIMIT_WAIT_SECONDS} seconds"
 )
 
 print(
-    f"Logical judge calls expected: "
-    f"{len(resume_cases) * 2}"
-)
-
-print(
-    f"Maximum simultaneous judge calls: "
-    f"{MAX_CONCURRENCY}"
+    "Runs one case at a time and retries operational "
+    "failures until successful."
 )
 
 print("#" * 90)
 
-
-# ============================================================
-# 8. RUN SMALL ASYNC BATCHES
-#
-# Each batch runs asynchronously.
-#
-# Successful batch:
-#     results persisted to Excel
-#
-# Failed batch:
-#     stop immediately
-#     inspect Azure 429 above
-#
-# NO custom retry is added here.
-# ============================================================
-
-all_results = []
-
-completed_cases = 0
 
 overall_started = time.perf_counter()
 
+completed_this_run = 0
+total_retries = 0
 
-for batch_offset in range(
-    0,
-    len(resume_cases),
-    BATCH_SIZE,
+
+for human_case_number in range(
+    START_CASE,
+    STOP_CASE + 1,
 ):
 
-    batch = resume_cases[
-        batch_offset :
-        batch_offset + BATCH_SIZE
-    ]
+    case_index = human_case_number - 1
+    case = cases[case_index]
 
-    first_case_number = (
-        START_CASE + batch_offset
-    )
+    attempt = 0
 
-    last_case_number = (
-        first_case_number
-        + len(batch)
-        - 1
-    )
+    while True:
 
-    print("\n")
-    print("=" * 90)
+        attempt += 1
 
-    print(
-        f"ASYNC BATCH: "
-        f"CASE {first_case_number}"
-        f" → CASE {last_case_number}"
-    )
+        # Reset response info for this attempt.
+        rate_limit_state[
+            "retry_after_seconds"
+        ] = None
 
-    print("=" * 90)
+        rate_limit_state[
+            "status_code"
+        ] = None
 
-    batch_started = time.perf_counter()
+        rate_limit_state[
+            "message"
+        ] = None
 
-    try:
+        rate_limit_state[
+            "request_id"
+        ] = None
 
-        batch_results = await framework_async.a_evaluate_many(
-            batch,
-            metrics=[
-                "coverage",
-                "faithfulness",
-            ],
-            run_name=RUN_NAME,
-            dataset_name=DATASET_NAME,
-            max_concurrency=MAX_CONCURRENCY,
-            show_progress=True,
-        )
-
-        all_results.extend(
-            batch_results
-        )
-
-        completed_cases += len(batch)
-
-        batch_elapsed = (
-            time.perf_counter()
-            - batch_started
-        )
 
         print("\n")
-        print("✓" * 45)
+        print("=" * 90)
 
         print(
-            f"✓ BATCH COMPLETED "
-            f"AND SAVED TO EXCEL"
-        )
-
-        print(
-            f"cases          : "
-            f"{first_case_number}"
-            f"–{last_case_number}"
+            f"CASE {human_case_number}"
+            f"/{STOP_CASE}"
+            f" | attempt {attempt}"
         )
 
         print(
-            f"batch time     : "
-            f"{batch_elapsed:.1f}s"
+            f"case_id: {case.case_id}"
         )
 
-        print(
-            f"total persisted: "
-            f"{completed_cases}"
-            f"/{len(resume_cases)}"
-        )
-
-        print(
-            f"Excel          : "
-            f"{EXCEL_PATH}"
-        )
-
-        print("✓" * 45)
+        print("=" * 90)
 
 
-    except Exception as exc:
-
-        batch_elapsed = (
-            time.perf_counter()
-            - batch_started
-        )
-
-        print("\n")
-        print("!" * 90)
-
-        print(
-            f"✗ BATCH FAILED"
-        )
-
-        print(
-            f"batch cases    : "
-            f"{first_case_number}"
-            f"–{last_case_number}"
-        )
-
-        print(
-            f"batch elapsed  : "
-            f"{batch_elapsed:.1f}s"
-        )
-
-        print(
-            f"previously persisted cases: "
-            f"{completed_cases}"
-        )
-
-        print(
-            f"final error    : "
-            f"{type(exc).__name__}"
-        )
-
-        print(
-            f"message        : {exc}"
-        )
-
-        print("!" * 90)
-
-        print_exception_chain(exc)
-
-        print("\nFULL TRACEBACK:")
-        traceback.print_exc()
-
-        print("\n")
-        print("#" * 90)
-
-        print(
-            "STOPPING AT FIRST FAILED ASYNC BATCH."
-        )
-
-        print(
-            "Do NOT immediately rerun."
-        )
-
-        print(
-            "Inspect the HTTP 429 response above, "
-            "especially retry-after / rate-limit headers "
-            "and response body."
-        )
-
-        print(
-            f"If we resume later, rerun from "
-            f"case {first_case_number}."
-        )
-
-        print("#" * 90)
-
-        break
+        started = time.perf_counter()
 
 
-else:
+        try:
 
-    overall_elapsed = (
-        time.perf_counter()
-        - overall_started
-    )
+            # =================================================
+            # ONE CASE AT A TIME
+            #
+            # Once BOTH metrics succeed, a_evaluate()
+            # publishes this case to the existing Excel writer.
+            # =================================================
 
-    print("\n")
-    print("#" * 90)
+            result = await framework_async.a_evaluate(
+                case,
+                metrics=[
+                    "coverage",
+                    "faithfulness",
+                ],
+                run_name=RUN_NAME,
+                dataset_name=DATASET_NAME,
+                max_concurrency=1,
+            )
 
-    print(
-        f"✓ ALL CASES "
-        f"{START_CASE}–{STOP_CASE} "
-        f"COMPLETED"
-    )
 
-    print(
-        f"Total cases    : "
-        f"{len(resume_cases)}"
-    )
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
 
-    print(
-        f"Total time     : "
-        f"{overall_elapsed:.1f}s"
-    )
 
-    print(
-        f"HTTP responses : "
-        f"{trace_state['total_responses']}"
-    )
+            coverage = result[
+                "coverage"
+            ]
 
-    print(
-        f"HTTP errors    : "
-        f"{trace_state['error_responses']}"
-    )
+            faithfulness = result[
+                "faithfulness"
+            ]
 
-    print(
-        f"429 responses  : "
-        f"{trace_state['rate_limit_responses']}"
-    )
 
-    print(
-        f"Excel saved to : "
-        f"{EXCEL_PATH}"
-    )
+            completed_this_run += 1
 
-    print("#" * 90)
+
+            print("\n")
+            print("✓" * 45)
+
+            print(
+                f"✓ CASE {human_case_number} COMPLETE"
+            )
+
+            print(
+                f"attempts       : {attempt}"
+            )
+
+            print(
+                f"elapsed        : {elapsed:.1f}s"
+            )
+
+            print(
+                f"coverage       : "
+                f"{coverage.score} "
+                f"({coverage.label})"
+            )
+
+            print(
+                f"faithfulness   : "
+                f"{faithfulness.score} "
+                f"({faithfulness.label})"
+            )
+
+            print(
+                "✓ persisted to existing Excel workbook"
+            )
+
+            print("✓" * 45)
+
+
+            # Success -> move to next case.
+            break
+
+
+        except Exception as exc:
+
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
+
+
+            operational_error = (
+                find_operational_error(exc)
+            )
+
+
+            # =================================================
+            # REAL BUG / CONFIG / PERSISTENCE ERROR
+            #
+            # Never infinitely retry these.
+            # =================================================
+
+            if operational_error is None:
+
+                print("\n")
+                print("X" * 90)
+
+                print(
+                    f"NON-OPERATIONAL ERROR "
+                    f"ON CASE {human_case_number}"
+                )
+
+                print(
+                    f"type    : "
+                    f"{type(exc).__name__}"
+                )
+
+                print(
+                    f"message : {exc}"
+                )
+
+                print(
+                    "This does NOT look like a temporary "
+                    "provider failure."
+                )
+
+                print(
+                    "Stopping instead of retrying a bug forever."
+                )
+
+                print("X" * 90)
+
+                traceback.print_exc()
+
+                raise
+
+
+            # =================================================
+            # TEMPORARY OPERATIONAL FAILURE
+            # =================================================
+
+            total_retries += 1
+
+            (
+                wait_seconds,
+                failure_kind,
+            ) = get_wait_seconds(exc)
+
+
+            print("\n")
+            print("!" * 90)
+
+            print(
+                f"⚠ CASE {human_case_number} "
+                f"ATTEMPT {attempt} FAILED TEMPORARILY"
+            )
+
+            print(
+                f"kind        : {failure_kind}"
+            )
+
+            print(
+                f"error       : "
+                f"{type(operational_error).__name__}"
+            )
+
+            print(
+                f"message     : "
+                f"{operational_error}"
+            )
+
+            print(
+                f"elapsed     : {elapsed:.1f}s"
+            )
+
+
+            if (
+                rate_limit_state[
+                    "retry_after_seconds"
+                ]
+                is not None
+            ):
+
+                print(
+                    "Azure retry-after: "
+                    f"{rate_limit_state['retry_after_seconds']}s"
+                )
+
+
+            if (
+                rate_limit_state[
+                    "request_id"
+                ]
+            ):
+
+                print(
+                    "request-id  : "
+                    f"{rate_limit_state['request_id']}"
+                )
+
+
+            print(
+                f"cooldown    : "
+                f"{wait_seconds:.0f}s "
+                f"({wait_seconds / 60:.1f} minutes)"
+            )
+
+            print(
+                "action      : "
+                "retry SAME case automatically"
+            )
+
+            print("!" * 90)
+
+
+            # =================================================
+            # COUNTDOWN
+            # =================================================
+
+            remaining = int(
+                wait_seconds
+            )
+
+            while remaining > 0:
+
+                # Print once per minute,
+                # plus final 30 seconds.
+                if (
+                    remaining % 60 == 0
+                    or remaining <= 30
+                ):
+
+                    print(
+                        f"Retrying case "
+                        f"{human_case_number} "
+                        f"in {remaining}s..."
+                    )
+
+                sleep_for = min(
+                    30,
+                    remaining,
+                )
+
+                await asyncio.sleep(
+                    sleep_for
+                )
+
+                remaining -= sleep_for
+
+
+            print(
+                f"\nRetrying case "
+                f"{human_case_number} now..."
+            )
+
+
+# ============================================================
+# FINISHED
+# ============================================================
+
+overall_elapsed = (
+    time.perf_counter()
+    - overall_started
+)
+
+
+print("\n")
+print("#" * 90)
+
+print(
+    f"✓ ALL CASES "
+    f"{START_CASE}–{STOP_CASE} COMPLETE"
+)
+
+print(
+    f"completed this run : "
+    f"{completed_this_run}"
+)
+
+print(
+    f"temporary retries  : "
+    f"{total_retries}"
+)
+
+print(
+    f"total elapsed      : "
+    f"{overall_elapsed / 60:.1f} minutes"
+)
+
+print(
+    "✓ Results persisted to the existing Excel workbook."
+)
+
+print("#" * 90)
