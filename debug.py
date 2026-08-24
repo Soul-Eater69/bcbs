@@ -1,308 +1,162 @@
-import importlib.metadata as metadata
+from pathlib import Path
+
+import pandas as pd
 
 from idp_eval import (
     CoverageEvaluator,
-    FaithfulnessEvaluator,
+    EvaluationCase,
     EvaluationFramework,
+    FaithfulnessEvaluator,
 )
 
-# =========================================================
-# 1. PRINT PACKAGE VERSIONS
-# =========================================================
 
-print("PACKAGE VERSIONS")
-print("-" * 80)
-print("openai:", metadata.version("openai"))
-print("arize-phoenix-evals:", metadata.version("arize-phoenix-evals"))
-print()
+# ============================================================
+# 1. LOAD DATA
+# ============================================================
+
+PARQUET_PATH = Path("../epic_gen.parquet")
+
+df = pd.read_parquet(PARQUET_PATH).fillna("")
+
+print("Rows:", len(df))
 
 
-# =========================================================
-# 2. CREATE A DEBUG FRAMEWORK
+# ============================================================
+# 2. BUILD EVALUATION CASES
 #
-# IMPORTANT:
-# - no new retry logic
-# - no retry configuration changes
-# - no Excel output
-# - no Phoenix result persistence
-# - same existing judge
-# - stops on first failure so we can inspect it properly
-# =========================================================
+# FIRST RUN:
+# context = theme_text
+# output  = generated Epic from context@5 generation
+# ============================================================
 
-debug_framework = EvaluationFramework(
+cases = []
+
+for row_index, row in df.iterrows():
+
+    # Prefer UUID because projectKey may repeat across rows.
+    case_id = str(row.get("uuid", row_index))
+
+    case = EvaluationCase(
+        case_id=case_id,
+
+        # Authoritative source for this first experiment
+        context={
+            "theme_text": row.get("theme_text", ""),
+        },
+
+        # Generated Epic being evaluated
+        output={
+            "epic_title": row.get(
+                "gen_epic_title_context@5",
+                "",
+            ),
+            "epic_description": row.get(
+                "gen_epic_description_context@5",
+                "",
+            ),
+            "epic_success_criteria": row.get(
+                "gen_epic_successCriteria_context@5",
+                "",
+            ),
+        },
+    )
+
+    cases.append(case)
+
+
+print("Evaluation cases:", len(cases))
+
+
+# ============================================================
+# 3. FRAMEWORK
+# ============================================================
+
+framework = EvaluationFramework(
     judge=judge,
     evaluators=[
-        FaithfulnessEvaluator,
         CoverageEvaluator,
+        FaithfulnessEvaluator,
     ],
+    output="excel",
+    excel_path="theme_text_vs_generated_epic.xlsx",
 )
 
 
-# =========================================================
-# 3. HELPER TO PRINT THE FULL EXCEPTION CHAIN
-# =========================================================
+# ============================================================
+# 4. RUN EVALUATION
+# ============================================================
 
-def inspect_exception(exc):
-    print()
-    print("=" * 100)
-    print("EXCEPTION DEBUG INFORMATION")
-    print("=" * 100)
+results = framework.evaluate_many(
+    cases,
+    metrics=[
+        "coverage",
+        "faithfulness",
+    ],
+    run_name="generated_epic_vs_theme_text",
+    dataset_name="epic_gen.parquet",
 
-    current = exc
-    seen = set()
-    depth = 0
-
-    while (
-        current is not None
-        and id(current) not in seen
-        and depth < 10
-    ):
-        seen.add(id(current))
-
-        print()
-        print("-" * 100)
-        print(f"EXCEPTION LEVEL {depth}")
-        print("-" * 100)
-
-        print(
-            "Type:",
-            f"{type(current).__module__}.{type(current).__name__}",
-        )
-
-        print("Message:", str(current))
-
-        # -------------------------------------------------
-        # Common useful attributes from Phoenix/OpenAI/httpx
-        # -------------------------------------------------
-
-        attrs = [
-            "status_code",
-            "request_id",
-            "code",
-            "type",
-            "param",
-            "current_rate_tokens_per_sec",
-            "initial_rate_tokens_per_sec",
-            "enforcement_window_seconds",
-        ]
-
-        print()
-        print("KNOWN ATTRIBUTES")
-
-        found_attribute = False
-
-        for attr in attrs:
-            try:
-                value = getattr(current, attr, None)
-            except Exception:
-                value = None
-
-            if value is not None:
-                found_attribute = True
-                print(f"  {attr}: {value}")
-
-        if not found_attribute:
-            print("  none")
+    # Use this if your progress-bar change is already in your branch.
+    show_progress=True,
+)
 
 
-        # -------------------------------------------------
-        # Inspect HTTP response if preserved by exception
-        # -------------------------------------------------
+# ============================================================
+# 5. BUILD SIMPLE RESULTS DATAFRAME
+# ============================================================
 
-        response = getattr(current, "response", None)
+rows = []
 
-        if response is not None:
-            print()
-            print("HTTP RESPONSE")
+for case, result in zip(cases, results):
 
-            try:
-                print(
-                    "  status_code:",
-                    response.status_code,
-                )
-            except Exception:
-                pass
+    coverage = result["coverage"]
+    faithfulness = result["faithfulness"]
 
-            try:
-                headers = response.headers
+    rows.append(
+        {
+            "case_id": case.case_id,
 
-                print()
-                print("IMPORTANT RESPONSE HEADERS")
+            "coverage_score": coverage.score,
+            "coverage_label": coverage.label,
+            "coverage_explanation": coverage.explanation,
 
-                interesting_headers = {}
+            "faithfulness_score": faithfulness.score,
+            "faithfulness_label": faithfulness.label,
+            "faithfulness_explanation": faithfulness.explanation,
 
-                for key, value in headers.items():
-                    lower = key.lower()
-
-                    if (
-                        "retry" in lower
-                        or "rate" in lower
-                        or "request-id" in lower
-                        or "request_id" in lower
-                        or "x-ms" in lower
-                    ):
-                        interesting_headers[key] = value
-
-                if interesting_headers:
-                    for key, value in interesting_headers.items():
-                        print(f"  {key}: {value}")
-                else:
-                    print("  none found")
-
-            except Exception as header_exc:
-                print(
-                    "  Could not inspect headers:",
-                    type(header_exc).__name__,
-                    str(header_exc),
-                )
-
-            try:
-                body = response.text
-
-                if body:
-                    print()
-                    print("RESPONSE BODY")
-                    print(body[:5000])
-
-            except Exception as body_exc:
-                print(
-                    "  Could not inspect response body:",
-                    type(body_exc).__name__,
-                    str(body_exc),
-                )
-
-
-        # -------------------------------------------------
-        # Inspect exception __dict__ for anything useful
-        # -------------------------------------------------
-
-        try:
-            exception_dict = vars(current)
-
-            if exception_dict:
-                print()
-                print("EXCEPTION __dict__ KEYS")
-
-                safe_keys = []
-
-                for key in exception_dict.keys():
-                    lower = key.lower()
-
-                    # Avoid accidentally dumping sensitive content.
-                    if not any(
-                        secret_word in lower
-                        for secret_word in [
-                            "token",
-                            "secret",
-                            "password",
-                            "authorization",
-                            "credential",
-                            "api_key",
-                        ]
-                    ):
-                        safe_keys.append(key)
-
-                print(" ", safe_keys)
-
-        except Exception:
-            pass
-
-
-        # -------------------------------------------------
-        # Walk chained exception
-        # -------------------------------------------------
-
-        next_exception = current.__cause__
-
-        if next_exception is None:
-            next_exception = current.__context__
-
-        current = next_exception
-        depth += 1
-
-
-    print()
-    print("=" * 100)
-    print("END EXCEPTION DEBUG")
-    print("=" * 100)
-
-
-# =========================================================
-# 4. RUN CASES SEQUENTIALLY UNTIL FIRST FAILURE
-#
-# This intentionally does NOT use evaluate_many().
-#
-# Reason:
-# We want to know exactly which case fails and inspect
-# the complete exception immediately.
-# =========================================================
-
-print()
-print("STARTING RATE-LIMIT DEBUG RUN")
-print("=" * 100)
-print(f"Total cases: {len(cases)}")
-print("Metrics: faithfulness, coverage")
-print("=" * 100)
-print()
-
-
-for index, case in enumerate(cases, start=1):
-
-    case_name = (
-        case.case_id
-        if case.case_id is not None
-        else f"index-{index - 1}"
+            # Optional explicit hallucination rate
+            "hallucination_rate": (
+                None
+                if faithfulness.score is None
+                else 1.0 - faithfulness.score
+            ),
+        }
     )
 
-    print(
-        f"[{index}/{len(cases)}] "
-        f"Running case={case_name}"
-    )
 
-    try:
-        result = debug_framework.evaluate(
-            case,
-            metrics=[
-                "faithfulness",
-                "coverage",
-            ],
-            run_name="rate_limit_debug",
-            dataset_name="golden_set_augmented_tagged.csv",
-        )
+evaluation_df = pd.DataFrame(rows)
 
-        faithfulness = result["faithfulness"]
-        coverage = result["coverage"]
-
-        print(
-            "  ✓ SUCCESS"
-            f" | faithfulness={faithfulness.score}"
-            f" ({faithfulness.label})"
-            f" | coverage={coverage.score}"
-            f" ({coverage.label})"
-        )
-
-        print()
-
-    except Exception as exc:
-        print()
-        print(
-            f"✗ FAILED"
-            f" | case={case_name}"
-            f" | position={index}/{len(cases)}"
-        )
-
-        inspect_exception(exc)
-
-        print()
-        print(
-            "DEBUG RUN STOPPED AT FIRST FAILURE."
-        )
-
-        break
+display(evaluation_df)
 
 
-else:
-    print()
-    print("=" * 100)
-    print("ALL CASES COMPLETED WITHOUT FAILURE")
-    print("=" * 100)
+# ============================================================
+# 6. OVERALL AVERAGES
+# ============================================================
+
+print()
+print("OVERALL RESULTS")
+print("=" * 70)
+
+print(
+    "Average Coverage:",
+    evaluation_df["coverage_score"].mean(),
+)
+
+print(
+    "Average Faithfulness:",
+    evaluation_df["faithfulness_score"].mean(),
+)
+
+print(
+    "Average Hallucination Rate:",
+    evaluation_df["hallucination_rate"].mean(),
+)
