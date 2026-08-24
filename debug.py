@@ -10,7 +10,20 @@
 # - Keeps retrying operational errors until success
 # - Real code/config errors still stop immediately
 # ============================================================
+EXCEL_PATH = "generated_epic_vs_context_at_5.xlsx"
 
+from idp_eval import EvaluationFramework
+from idp_eval.evaluators import CoverageEvaluator, FaithfulnessEvaluator
+
+framework_async = EvaluationFramework(
+    judge=judge,
+    evaluators=[
+        CoverageEvaluator(verbose=True),
+        FaithfulnessEvaluator(verbose=True),
+    ],
+    output="excel",
+    excel_path="generated_epic_vs_context_at_5.xlsx",
+)
 import asyncio
 import time
 import traceback
