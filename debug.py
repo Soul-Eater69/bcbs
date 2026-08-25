@@ -1,87 +1,33 @@
-# ============================================================
-# RUN 3
-# GENERATED EPIC vs (theme_text + context@5)
-#
-# NEW Excel:
-#   generated_epic_vs_theme_plus_context_at_5.xlsx
-#
-# - Coverage + Faithfulness
-# - Cases 1 -> 50
-# - One case at a time
-# - Operational failure / 429:
-#       wait 3 minutes
-#       retry SAME case
-#       keep retrying until success
-# - Programming/config errors still stop immediately
-# ============================================================
-
-import asyncio
-import time
-import traceback
 import numpy as np
+import pandas as pd
 
-from idp_eval import EvaluationCase, EvaluationFramework
-from idp_eval.evaluators import (
+from idp_eval import (
     CoverageEvaluator,
     FaithfulnessEvaluator,
+    EvaluationCase,
+    EvaluationFramework,
 )
 
-from phoenix.evals.rate_limiters import (
-    RateLimitError as PhoenixRateLimitError,
-)
-
-
-# ============================================================
-# OPTIONAL PROVIDER ERROR TYPES
-# ============================================================
-
-try:
-    from openai import (
-        RateLimitError as OpenAIRateLimitError,
-        APITimeoutError,
-        APIConnectionError,
-        InternalServerError,
-    )
-except ImportError:
-    OpenAIRateLimitError = None
-    APITimeoutError = None
-    APIConnectionError = None
-    InternalServerError = None
-
-
-try:
-    import httpx
-except ImportError:
-    httpx = None
-
-
-# ============================================================
+# =========================================================
 # CONFIG
-# ============================================================
+# =========================================================
 
-EXCEL_PATH = "generated_epic_vs_theme_plus_context_at_5.xlsx"
+PARQUET_PATH = "epic_gen.parquet"
 
-RUN_NAME = "generated_epic_vs_theme_plus_context_at_5"
+EXCEL_PATH = "generated_epic_vs_theme_text_v4_test5.xlsx"
 
-DATASET_NAME = "epic_gen.parquet"
-
-START_CASE = 1
-
-RATE_LIMIT_WAIT_SECONDS = 180       # 3 minutes
-OTHER_OPERATIONAL_WAIT_SECONDS = 60
+# If your parquet has epic_id, it will be used.
+# Otherwise dataframe index will be used.
+EPIC_ID_COLUMN = "epic_id"
 
 
-# ============================================================
-# CONVERT PARQUET / NUMPY VALUES
-# ============================================================
+# =========================================================
+# HELPER: CONVERT NUMPY/PARQUET VALUES TO NORMAL PYTHON
+# =========================================================
 
 def to_python(value):
-
     if isinstance(value, np.ndarray):
-        return [
-            to_python(v)
-            for v in value.tolist()
-        ]
+        return [to_python(v) for v in value.tolist()]
 
     if isinstance(value, np.generic):
         return value.item()
@@ -93,668 +39,185 @@ def to_python(value):
         }
 
     if isinstance(value, (list, tuple)):
-        return [
-            to_python(v)
-            for v in value
-        ]
+        return [to_python(v) for v in value]
 
     return value
 
 
-# ============================================================
-# VALIDATE REQUIRED DATA
-# ============================================================
+# =========================================================
+# GENERATED EPIC OUTPUT
+# =========================================================
 
-required_columns = [
-    "theme_text",
-    "context@5",
-]
-
-missing_columns = [
-    col
-    for col in required_columns
-    if col not in df.columns
-]
-
-if missing_columns:
-    raise KeyError(
-        f"Missing required columns: {missing_columns}"
-    )
+def build_generated_epic(row):
+    return {
+        "epic_title": to_python(
+            row["gen_epic_title_context@5"]
+        ),
+        "epic_description": to_python(
+            row["gen_epic_description_context@5"]
+        ),
+        "epic_success_criteria": to_python(
+            row["gen_epic_successCriteria_context@5"]
+        ),
+    }
 
 
-if len(df) != len(cases):
-    raise ValueError(
-        f"df contains {len(df)} rows but cases contains "
-        f"{len(cases)} cases. They must align row-for-row."
-    )
+# =========================================================
+# LOAD ONLY FIRST 5 ROWS
+# =========================================================
+
+df = pd.read_parquet(PARQUET_PATH).head(5)
+
+print(f"Loaded {len(df)} rows for test run")
 
 
-# ============================================================
-# BUILD RUN 3 CASES
+# =========================================================
+# BUILD CASES
 #
-# SAME generated Epic output.
-#
-# Authoritative context now contains BOTH:
-#
-#   1. theme_text
-#   2. context@5
-# ============================================================
+# RUN 1:
+# generated epic VS theme_text
+# =========================================================
 
-combined_cases = []
+cases = []
 
+for index, row in df.iterrows():
 
-for position, (_, row) in enumerate(df.iterrows()):
+    if EPIC_ID_COLUMN in df.columns and pd.notna(row[EPIC_ID_COLUMN]):
+        case_id = str(row[EPIC_ID_COLUMN])
+    else:
+        case_id = str(index)
 
-    original_case = cases[position]
+    case = EvaluationCase(
+        case_id=case_id,
 
-    combined_case = EvaluationCase(
+        input="Generate an Epic from the supplied business theme.",
 
-        input=original_case.input,
-
-        # ====================================================
-        # RUN 3 CONTEXT
-        # ====================================================
-
+        # Authoritative source for RUN 1
         context={
             "theme_text": to_python(
                 row["theme_text"]
-            ),
-            "context_at_5": to_python(
-                row["context@5"]
-            ),
+            )
         },
 
-        # ====================================================
-        # SAME GENERATED EPIC OUTPUT AS RUNS 1 AND 2
-        # ====================================================
-
-        output=original_case.output,
-
-        instructions=original_case.instructions,
-
-        case_id=original_case.case_id,
-
-        metadata=(
-            dict(original_case.metadata)
-            if original_case.metadata is not None
-            else None
-        ),
-
-        retrieved_documents=(
-            original_case.retrieved_documents
-        ),
-
-        evaluation_scope=(
-            original_case.evaluation_scope
-        ),
+        # Generated Epic being evaluated
+        output=build_generated_epic(row),
     )
 
-    combined_cases.append(
-        combined_case
-    )
+    cases.append(case)
 
 
-STOP_CASE = len(combined_cases)
+print(f"Built {len(cases)} evaluation cases")
 
 
-# ============================================================
-# CREATE A NEW FRAMEWORK
+# =========================================================
+# FRAMEWORK
 #
 # IMPORTANT:
-# This gives Run 3 its OWN Excel workbook.
-# ============================================================
+# max_items=None = EXHAUSTIVE MODE
+#
+# It does NOT mean 5 evaluator items.
+#
+# We are testing only 5 dataframe rows while allowing
+# Coverage/Faithfulness to extract all material atomic
+# items/claims from each row.
+# =========================================================
 
-framework_run3 = EvaluationFramework(
-
-    judge=judge,
+framework = EvaluationFramework(
+    judge=judge,  # use your already configured judge
 
     evaluators=[
         CoverageEvaluator(
-            verbose=True
+            max_items=None,
+            reason_mode="overall",
+            verbose=True,
         ),
+
         FaithfulnessEvaluator(
-            verbose=True
+            max_items=None,
+            reason_mode="overall",
+            verbose=True,
         ),
     ],
 
-    output="excel",
+    # Phoenix + Excel
+    output="both",
 
     excel_path=EXCEL_PATH,
+
+    # Allows safe restart/resume
+    resume=True,
+
+    # Keep actual source/output visible in Excel
+    report_fields=[
+        "context",
+        "output",
+    ],
 )
 
 
-# ============================================================
-# SANITY CHECK
-# ============================================================
+# =========================================================
+# RUN EVALUATION
+# =========================================================
 
-print("=" * 90)
+results = framework.evaluate_many(
+    cases,
 
-print("RUN 3 SETUP")
+    metrics=[
+        "coverage",
+        "faithfulness",
+    ],
 
-print("=" * 90)
+    run_name="generated_epic_vs_theme_text_v4_exhaustive_test5",
 
-print(
-    "Run name      :",
-    RUN_NAME,
-)
+    dataset_name="epic_gen.parquet",
 
-print(
-    "Excel         :",
-    EXCEL_PATH,
-)
+    # Provider failures get recorded without losing
+    # already-completed cases.
+    on_error="continue",
 
-print(
-    "Dataset       :",
-    DATASET_NAME,
-)
-
-print(
-    "Total cases   :",
-    len(combined_cases),
-)
-
-print(
-    "First case ID :",
-    combined_cases[0].case_id,
-)
-
-print(
-    "Last case ID  :",
-    combined_cases[-1].case_id,
-)
-
-print(
-    "\nContext used:"
-)
-
-print(
-    "  theme_text + context@5"
+    show_progress=True,
 )
 
 
-# ============================================================
-# BUILD OPERATIONAL ERROR TYPES
-# ============================================================
+# =========================================================
+# PRINT RESULTS
+# =========================================================
 
-operational_types = [
-    PhoenixRateLimitError,
-]
+print("\n================ RESULTS ================\n")
 
+for case, result in zip(cases, results):
 
-for exc_type in (
-    OpenAIRateLimitError,
-    APITimeoutError,
-    APIConnectionError,
-    InternalServerError,
-):
+    print(f"Case: {case.case_id}")
 
-    if isinstance(
-        exc_type,
-        type,
-    ):
-        operational_types.append(
-            exc_type
-        )
+    coverage = result["coverage"]
+    faithfulness = result["faithfulness"]
 
-
-if httpx is not None:
-
-    operational_types.extend(
-        [
-            httpx.TimeoutException,
-            httpx.TransportError,
-        ]
+    print(
+        "Coverage:",
+        coverage.score,
+        "|",
+        coverage.label,
     )
 
-
-OPERATIONAL_TYPES = tuple(
-    set(operational_types)
-)
-
-
-# ============================================================
-# FIND TEMPORARY ERROR ANYWHERE IN EXCEPTION CHAIN
-# ============================================================
-
-def find_operational_error(exc):
-
-    current = exc
-
-    seen = set()
-
-    while (
-        current is not None
-        and id(current) not in seen
-    ):
-
-        seen.add(
-            id(current)
-        )
-
-        if isinstance(
-            current,
-            OPERATIONAL_TYPES,
-        ):
-            return current
-
-        if current.__cause__ is not None:
-            current = current.__cause__
-        else:
-            current = current.__context__
-
-    return None
-
-
-# ============================================================
-# RATE-LIMIT TYPE CHECK
-# ============================================================
-
-rate_limit_types = [
-    PhoenixRateLimitError,
-]
-
-
-if isinstance(
-    OpenAIRateLimitError,
-    type,
-):
-    rate_limit_types.append(
-        OpenAIRateLimitError
+    print(
+        "Coverage explanation:",
+        coverage.explanation,
     )
 
-
-RATE_LIMIT_TYPES = tuple(
-    rate_limit_types
-)
-
-
-# ============================================================
-# RUN
-# ============================================================
-
-print("\n")
-print("#" * 90)
-
-print(
-    "RUN 3: GENERATED EPIC "
-    "vs THEME TEXT + CONTEXT@5"
-)
-
-print(
-    f"Cases: {START_CASE} -> {STOP_CASE}"
-)
-
-print(
-    "Metrics: coverage + faithfulness"
-)
-
-print(
-    "429 throttle cooldown: "
-    f"{RATE_LIMIT_WAIT_SECONDS}s "
-    f"({RATE_LIMIT_WAIT_SECONDS / 60:.0f} minutes)"
-)
-
-print(
-    "Operational errors retry automatically "
-    "until the case succeeds."
-)
-
-print("#" * 90)
-
-
-overall_started = time.perf_counter()
-
-completed_this_run = 0
-total_retries = 0
-
-
-# ============================================================
-# ONE CASE AT A TIME
-# ============================================================
-
-for human_case_number in range(
-    START_CASE,
-    STOP_CASE + 1,
-):
-
-    case = combined_cases[
-        human_case_number - 1
-    ]
-
-    attempt = 0
-
-
-    while True:
-
-        attempt += 1
-
-        print("\n")
-        print("=" * 90)
-
-        print(
-            f"RUN 3 | CASE "
-            f"{human_case_number}/{STOP_CASE} "
-            f"| attempt {attempt}"
-        )
-
-        print(
-            f"case_id: {case.case_id}"
-        )
-
-        print("=" * 90)
-
-
-        started = time.perf_counter()
-
-
-        try:
-
-            # =================================================
-            # ONE CASE
-            #
-            # Coverage + Faithfulness
-            #
-            # max_concurrency=1 protects PTU capacity.
-            # =================================================
-
-            result = await framework_run3.a_evaluate(
-
-                case,
-
-                metrics=[
-                    "coverage",
-                    "faithfulness",
-                ],
-
-                run_name=RUN_NAME,
-
-                dataset_name=DATASET_NAME,
-
-                max_concurrency=1,
-            )
-
-
-            elapsed = (
-                time.perf_counter()
-                - started
-            )
-
-
-            coverage = result[
-                "coverage"
-            ]
-
-            faithfulness = result[
-                "faithfulness"
-            ]
-
-
-            completed_this_run += 1
-
-
-            # =================================================
-            # SUCCESS
-            # =================================================
-
-            print("\n")
-            print("✓" * 45)
-
-            print(
-                f"✓ RUN 3 CASE "
-                f"{human_case_number} COMPLETE"
-            )
-
-            print(
-                f"attempts       : {attempt}"
-            )
-
-            print(
-                f"elapsed        : "
-                f"{elapsed:.1f}s"
-            )
-
-            print(
-                "coverage       : "
-                f"{coverage.score} "
-                f"({coverage.label})"
-            )
-
-            print(
-                "faithfulness   : "
-                f"{faithfulness.score} "
-                f"({faithfulness.label})"
-            )
-
-            print(
-                f"✓ saved to {EXCEL_PATH}"
-            )
-
-            print("✓" * 45)
-
-
-            # Success -> next case
-            break
-
-
-        except Exception as exc:
-
-            elapsed = (
-                time.perf_counter()
-                - started
-            )
-
-
-            operational_error = (
-                find_operational_error(
-                    exc
-                )
-            )
-
-
-            # =================================================
-            # REAL ERROR
-            # =================================================
-
-            if operational_error is None:
-
-                print("\n")
-                print("X" * 90)
-
-                print(
-                    f"NON-OPERATIONAL ERROR "
-                    f"ON RUN 3 CASE "
-                    f"{human_case_number}"
-                )
-
-                print(
-                    f"case_id : "
-                    f"{case.case_id}"
-                )
-
-                print(
-                    f"type    : "
-                    f"{type(exc).__name__}"
-                )
-
-                print(
-                    f"message : {exc}"
-                )
-
-                print(
-                    "Stopping because this does not "
-                    "look like a temporary provider error."
-                )
-
-                print("X" * 90)
-
-                traceback.print_exc()
-
-                raise
-
-
-            # =================================================
-            # TEMPORARY ERROR
-            # =================================================
-
-            total_retries += 1
-
-
-            if isinstance(
-                operational_error,
-                RATE_LIMIT_TYPES,
-            ):
-
-                wait_seconds = (
-                    RATE_LIMIT_WAIT_SECONDS
-                )
-
-                failure_kind = (
-                    "rate_limit"
-                )
-
-            else:
-
-                wait_seconds = (
-                    OTHER_OPERATIONAL_WAIT_SECONDS
-                )
-
-                failure_kind = (
-                    "temporary_provider_error"
-                )
-
-
-            print("\n")
-            print("!" * 90)
-
-            print(
-                f"⚠ RUN 3 CASE "
-                f"{human_case_number} "
-                f"ATTEMPT {attempt} "
-                f"FAILED TEMPORARILY"
-            )
-
-            print(
-                f"kind     : "
-                f"{failure_kind}"
-            )
-
-            print(
-                f"error    : "
-                f"{type(operational_error).__name__}"
-            )
-
-            print(
-                f"message  : "
-                f"{operational_error}"
-            )
-
-            print(
-                f"elapsed  : "
-                f"{elapsed:.1f}s"
-            )
-
-            print(
-                f"cooldown : "
-                f"{wait_seconds}s "
-                f"({wait_seconds / 60:.1f} minutes)"
-            )
-
-            print(
-                "action   : retry same case automatically"
-            )
-
-            print("!" * 90)
-
-
-            # =================================================
-            # COUNTDOWN
-            # =================================================
-
-            remaining = int(
-                wait_seconds
-            )
-
-
-            while remaining > 0:
-
-                if (
-                    remaining % 60 == 0
-                    or remaining <= 30
-                ):
-
-                    print(
-                        f"Retrying case "
-                        f"{human_case_number} "
-                        f"in {remaining}s..."
-                    )
-
-
-                sleep_for = min(
-                    30,
-                    remaining,
-                )
-
-
-                await asyncio.sleep(
-                    sleep_for
-                )
-
-
-                remaining -= (
-                    sleep_for
-                )
-
-
-            print(
-                f"\nRetrying Run 3 case "
-                f"{human_case_number} now..."
-            )
-
-
-# ============================================================
-# COMPLETE
-# ============================================================
-
-overall_elapsed = (
-    time.perf_counter()
-    - overall_started
-)
-
-
-print("\n")
-print("#" * 90)
-
-print(
-    "✓ RUN 3 COMPLETE"
-)
-
-print(
-    f"✓ Cases 1-{STOP_CASE} complete"
-)
-
-print(
-    f"completed cases   : "
-    f"{completed_this_run}"
-)
-
-print(
-    f"temporary retries : "
-    f"{total_retries}"
-)
-
-print(
-    f"total elapsed     : "
-    f"{overall_elapsed / 60:.1f} minutes"
-)
-
-print(
-    f"Excel             : "
-    f"{EXCEL_PATH}"
-)
-
-print(
-    f"run_name          : "
-    f"{RUN_NAME}"
-)
-
-print("#" * 90)
+    print(
+        "Faithfulness:",
+        faithfulness.score,
+        "|",
+        faithfulness.label,
+    )
+
+    print(
+        "Faithfulness explanation:",
+        faithfulness.explanation,
+    )
+
+    print("-" * 80)
+
+
+print("\nTest run complete.")
+print(f"Excel saved to: {EXCEL_PATH}")
