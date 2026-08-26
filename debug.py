@@ -12,32 +12,60 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+L3_CAP_FIELD_ID = "customfield_18603"
+
+
+def get_epic_l3_cap(epic_key: str):
+    response = httpx.get(
+        f"{JIRA_BASE_URL}/rest/api/2/issue/{epic_key}",
+        headers=HEADERS,
+        params={
+            "fields": f"summary,{L3_CAP_FIELD_ID}"
+        },
+        verify=False,
+        timeout=60,
+    )
+
+    response.raise_for_status()
+
+    issue = response.json()
+    fields = issue.get("fields", {})
+
+    raw_l3 = fields.get(L3_CAP_FIELD_ID) or []
+
+    l3_caps = []
+
+    for item in raw_l3:
+        if isinstance(item, dict):
+            l3_caps.append({
+                "value": item.get("value"),
+                "id": item.get("id"),
+            })
+        else:
+            l3_caps.append({
+                "value": str(item),
+                "id": None,
+            })
+
+    return {
+        "epic_key": issue.get("key", epic_key),
+        "epic_summary": fields.get("summary"),
+        "l3_capabilities": l3_caps,
+    }
+
+
+# -----------------------------
+# RUN
+# -----------------------------
+
 EPIC_KEY = "GROUP-21164"
 
-L3_FIELDS = {
-    "Capability Lvl3": "customfield_12507",
-    "L3 Business Capability Model": "customfield_18603",
-}
+result = get_epic_l3_cap(EPIC_KEY)
 
-response = httpx.get(
-    f"{JIRA_BASE_URL}/rest/api/2/issue/{EPIC_KEY}",
-    headers=HEADERS,
-    params={
-        "fields": "summary," + ",".join(L3_FIELDS.values())
-    },
-    verify=False,
-    timeout=60,
-)
+print("Epic Key:", result["epic_key"])
+print("Summary :", result["epic_summary"])
 
-response.raise_for_status()
+print("\nL3 Capabilities:")
 
-issue = response.json()
-fields = issue["fields"]
-
-print("Epic:", issue["key"])
-print("Summary:", fields.get("summary"))
-
-for name, field_id in L3_FIELDS.items():
-    print(f"\n{name}")
-    print("Field ID:", field_id)
-    print("Value:", fields.get(field_id))
+for cap in result["l3_capabilities"]:
+    print(f"- {cap['value']}  (Jira option id: {cap['id']})")
