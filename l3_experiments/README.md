@@ -61,6 +61,11 @@ the separate evaluation section.
 
 Each experiment reports Epic-level exact-set match, precision, recall, and F1 against Jira ground truth, and writes an Excel result workbook under `results/`.
 
+Evaluation also reports the union of candidate IDs available across each Epic's
+retrieved stages, the number of ground-truth IDs present in that union, and the
+resulting availability fraction. These diagnostics are calculated only after
+prediction and are never supplied to the model.
+
 ## Fair comparison
 
 Keep the model, temperature/settings, candidate ordering, system prompt, dataset, and ground truth fixed across all five experiments. Only the context fields supplied in the user prompt should vary.

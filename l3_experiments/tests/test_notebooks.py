@@ -1,8 +1,13 @@
 import ast
+import io
 import json
 from pathlib import Path
+import tokenize
 
+import pandas as pd
 import pytest
+
+from common import score_sets
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -141,6 +146,26 @@ def extracted_prompt_builder(source):
     return namespace["build_user_prompt"]
 
 
+def extracted_functions(source, function_names, namespace=None):
+    tree = ast.parse(source)
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in function_names
+    ]
+    assert {function.name for function in functions} == set(function_names)
+    execution_namespace = dict(namespace or {})
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[])),
+            "<notebook_functions>",
+            "exec",
+        ),
+        execution_namespace,
+    )
+    return execution_namespace
+
+
 def leaf_paths(value, prefix=""):
     paths = set()
     for key, child in value.items():
@@ -271,3 +296,179 @@ def test_candidate_retrieval_is_identical_except_hierarchy_projection():
 
     assert len(set(retrieval_bodies[:4])) == 1
     assert retrieval_bodies[4] != retrieval_bodies[0]
+
+
+@pytest.fixture(scope="module")
+def exported_list_parser():
+    source = code_source(load_notebook(NOTEBOOKS[0]))
+    namespace = extracted_functions(
+        source,
+        {"clean_text", "parse_exported_list"},
+        {"ast": ast, "io": io, "pd": pd, "tokenize": tokenize},
+    )
+    return namespace["parse_exported_list"]
+
+
+def test_parse_exported_list_handles_standard_python_list(exported_list_parser):
+    assert exported_list_parser("['GROUP-1', 'GROUP-2']") == [
+        "GROUP-1",
+        "GROUP-2",
+    ]
+
+
+def test_parse_exported_list_handles_whitespace_separated_quoted_values(
+    exported_list_parser,
+):
+    assert exported_list_parser("['GROUP-1' 'GROUP-2']") == [
+        "GROUP-1",
+        "GROUP-2",
+    ]
+
+
+def test_parse_exported_list_preserves_commas_inside_values(exported_list_parser):
+    assert exported_list_parser(
+        "['Approve claims, appeals, and adjustments' 'Notify the member, promptly']"
+    ) == [
+        "Approve claims, appeals, and adjustments",
+        "Notify the member, promptly",
+    ]
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", float("nan")])
+def test_parse_exported_list_handles_empty_and_nan_values(exported_list_parser, value):
+    assert exported_list_parser(value) == []
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("GROUP-1", ["GROUP-1"]),
+        ("['GROUP-1']", ["GROUP-1"]),
+        ("A description, with commas", ["A description, with commas"]),
+    ],
+)
+def test_parse_exported_list_handles_single_item_values(
+    exported_list_parser,
+    value,
+    expected,
+):
+    assert exported_list_parser(value) == expected
+
+
+def test_exported_list_parser_is_identical_in_all_notebooks():
+    parser_bodies = []
+    for path in NOTEBOOKS:
+        tree = ast.parse(code_source(load_notebook(path)))
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "parse_exported_list"
+        )
+        parser_bodies.append(ast.dump(function, include_attributes=False))
+    assert len(set(parser_bodies)) == 1
+
+
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda path: path.name)
+def test_candidates_are_sorted_by_name_then_id(path):
+    source = code_source(load_notebook(path))
+    namespace = extracted_functions(
+        source,
+        {"clean_text", "candidate_rows_for_stage"},
+        {
+            "pd": pd,
+            "stage_capability_map": pd.DataFrame(
+                [
+                    {
+                        "Value Stream Stage ID": "STAGE-1",
+                        "Capability ID": "CAP-3",
+                        "Capability Name": "Claims",
+                        "Level 1 Name": "L1",
+                        "Level 2 Name": "L2",
+                    },
+                    {
+                        "Value Stream Stage ID": "STAGE-1",
+                        "Capability ID": "CAP-2",
+                        "Capability Name": "Billing",
+                        "Level 1 Name": "L1",
+                        "Level 2 Name": "L2",
+                    },
+                    {
+                        "Value Stream Stage ID": "STAGE-1",
+                        "Capability ID": "CAP-1",
+                        "Capability Name": "Billing",
+                        "Level 1 Name": "L1",
+                        "Level 2 Name": "L2",
+                    },
+                ]
+            ),
+            "capability_master": pd.DataFrame(
+                [
+                    {
+                        "Capability ID": capability_id,
+                        "Capability Description": "Description",
+                        "Capability Tier": "Core",
+                    }
+                    for capability_id in ("CAP-1", "CAP-2", "CAP-3")
+                ]
+            ),
+        },
+    )
+    candidates = namespace["candidate_rows_for_stage"]("STAGE-1")
+    assert [candidate["capability_id"] for candidate in candidates] == [
+        "CAP-1",
+        "CAP-2",
+        "CAP-3",
+    ]
+
+
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda path: path.name)
+def test_evaluation_reports_gt_candidate_availability(path):
+    source = code_source(load_notebook(path))
+    namespace = extracted_functions(
+        source,
+        {"evaluate_predictions"},
+        {
+            "json": json,
+            "pd": pd,
+            "score_sets": score_sets,
+            "ground_truth_by_epic": lambda: {
+                "EPIC-1": {"CAP-1", "CAP-2", "CAP-4"}
+            },
+        },
+    )
+    predictions = pd.DataFrame(
+        [
+            {
+                "experiment": "E",
+                "theme_id": "THEME-1",
+                "epic_key": "EPIC-1",
+                "stage_ids": '["STAGE-1", "STAGE-2"]',
+                "available_candidate_l3_ids": '["CAP-1", "CAP-2", "CAP-3"]',
+                "predicted_l3_ids": '["CAP-1"]',
+                "model_reasons": "[]",
+                "stage_predictions": "[]",
+                "status": "ok",
+                "error": None,
+            }
+        ]
+    )
+
+    result = namespace["evaluate_predictions"](predictions).iloc[0]
+
+    assert json.loads(result["gt_available_candidate_l3_ids"]) == ["CAP-1", "CAP-2"]
+    assert result["gt_candidate_available_count"] == 2
+    assert result["gt_candidate_availability_fraction"] == pytest.approx(2 / 3)
+
+
+def test_gt_availability_is_computed_only_in_evaluation():
+    for path in NOTEBOOKS:
+        tree = ast.parse(code_source(load_notebook(path)))
+        functions = {
+            node.name: ast.unparse(node)
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        for name in ("build_user_prompt", "predict_for_stage", "run_predictions"):
+            assert "truth" not in functions[name].lower()
+            assert "gt_" not in functions[name].lower()
+        assert "gt_candidate_availability_fraction" in functions["evaluate_predictions"]
