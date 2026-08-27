@@ -6,47 +6,155 @@ This module only contains identical infrastructure used by every experiment.
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import re
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+import httpx
 import pandas as pd
+from dotenv import load_dotenv
 
 
-def load_gateway(factory_path: str | None = None) -> Any:
-    """Load the existing project IDP gateway via ``module:function``.
+class IDPGatewayClient:
+    """Session-reusable client for the IDP LLM chat-completions gateway."""
 
-    Example::
-        IDP_GATEWAY_FACTORY=my_project.gateway:get_idp_gateway
+    def __init__(self, verify_ssl: bool = False, timeout: float = 90.0):
+        load_dotenv()
+        self.verify_ssl = verify_ssl
+        self.timeout = timeout
+        self.model = self._required_env("LLM_MODEL")
+        self.app_id = self._required_env("LLM_APP_ID")
+        self.auth_url = self._required_env("IDP_AUTH_URL")
+        self.gateway_url = (
+            self._required_env("LLM_BASE_URL").rstrip("/")
+            + "/api/v1/chatcompletions"
+        )
+        self._client = httpx.Client(verify=verify_ssl, timeout=timeout)
+        self._token: str | None = None
 
-    The factory must return an object exposing ``chat(system_prompt=..., user_prompt=...)``.
-    """
-    factory_path = factory_path or os.getenv("IDP_GATEWAY_FACTORY")
-    if not factory_path:
-        raise RuntimeError(
-            "Set IDP_GATEWAY_FACTORY to 'module:function' or pass factory_path explicitly."
+    @staticmethod
+    def _required_env(name: str) -> str:
+        value = os.getenv(name)
+        if not value:
+            raise RuntimeError(f"Missing environment variable: {name}")
+        return value
+
+    def _get_token(self) -> str:
+        response = self._client.post(
+            self.auth_url,
+            headers={
+                "Accept": "*/*",
+                "ClientId": self._required_env("IDP_CLIENT_ID"),
+                "ClientSecret": self._required_env("IDP_CLIENT_SECRET"),
+                "scope": "profile openid roles permissions",
+            },
+            json={
+                "username": self._required_env("IDP_USER"),
+                "password": self._required_env("IDP_PASSWORD"),
+            },
+        )
+        response.raise_for_status()
+
+        token = response.json().get("jwt_token")
+        if not token:
+            raise RuntimeError("IDP token response did not contain jwt_token.")
+        return token
+
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        **options: Any,
+    ) -> dict[str, Any]:
+        """Send chat messages and return the complete gateway response."""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "api_version": "2024-04-01-preview",
+            **options,
+        }
+
+        for attempt in range(2):
+            if self._token is None:
+                self._token = self._get_token()
+
+            response = self._client.post(
+                self.gateway_url,
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "app-id": self.app_id,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json=payload,
+            )
+
+            if response.status_code != 401 or attempt == 1:
+                break
+
+            self._token = self._get_token()
+
+        if response.is_error:
+            raise RuntimeError(
+                f"IDP gateway request failed ({response.status_code}): {response.text}"
+            )
+
+        result = response.json()
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Unexpected IDP gateway response: {result}")
+        return result
+
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        **options: Any,
+    ) -> str:
+        """Return the assistant text for a system prompt and a user prompt."""
+        response = self.complete(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            **options,
         )
 
-    module_name, sep, factory_name = factory_path.partition(":")
-    if not sep or not module_name or not factory_name:
-        raise ValueError("IDP_GATEWAY_FACTORY must use the form 'module:function'.")
+        choice = response.get("choice") or (response.get("choices") or [None])[0]
+        content = (choice or {}).get("message", {}).get("content")
 
-    module = importlib.import_module(module_name)
-    factory = getattr(module, factory_name)
-    gateway = factory()
-    if not hasattr(gateway, "chat"):
-        raise TypeError("Gateway factory must return an object with a chat(...) method.")
-    return gateway
+        if not isinstance(content, str):
+            raise RuntimeError(f"Unexpected IDP gateway response: {response}")
+        return content
+
+    def close(self) -> None:
+        """Close the persistent HTTP connection when the notebook is finished."""
+        self._client.close()
+
+
+_idp_gateway: IDPGatewayClient | None = None
+
+
+def get_idp_gateway() -> IDPGatewayClient:
+    """Create the IDP LLM gateway client once and reuse it across notebook cells."""
+    global _idp_gateway
+    if _idp_gateway is None:
+        _idp_gateway = IDPGatewayClient(verify_ssl=False)
+    return _idp_gateway
+
+
+def load_gateway() -> IDPGatewayClient:
+    """Backward-compatible notebook helper returning the shared IDP gateway."""
+    return get_idp_gateway()
 
 
 def call_llm(gateway: Any, system_prompt: str, user_prompt: str) -> str:
-    """Call the existing IDP gateway using the interface shown in the current workflow."""
+    """Call the IDP gateway using the interface shared by every experiment."""
     response = gateway.chat(system_prompt=system_prompt, user_prompt=user_prompt)
     if not isinstance(response, str):
-        raise TypeError(f"gateway.chat(...) must return str, got {type(response).__name__}")
+        raise TypeError(
+            f"gateway.chat(...) must return str, got {type(response).__name__}"
+        )
     return response
 
 
@@ -55,7 +163,11 @@ def parse_json_response(text: str) -> dict[str, Any]:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("LLM returned an empty response.")
 
-    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    fenced = re.search(
+        r"```(?:json)?\s*(.*?)\s*```",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     candidate = fenced.group(1) if fenced else text.strip()
 
     try:
@@ -130,7 +242,10 @@ def validate_l3_response(
     return normalized
 
 
-def score_sets(predicted: Iterable[str], truth: Iterable[str]) -> dict[str, float | int]:
+def score_sets(
+    predicted: Iterable[str],
+    truth: Iterable[str],
+) -> dict[str, float | int]:
     """Calculate exact-set match, precision, recall and F1 for one Epic."""
     predicted_set = {str(value).strip() for value in predicted if str(value).strip()}
     truth_set = {str(value).strip() for value in truth if str(value).strip()}
@@ -138,9 +253,9 @@ def score_sets(predicted: Iterable[str], truth: Iterable[str]) -> dict[str, floa
     if not predicted_set and not truth_set:
         precision = recall = f1 = 1.0
     else:
-        tp = len(predicted_set & truth_set)
-        precision = tp / len(predicted_set) if predicted_set else 0.0
-        recall = tp / len(truth_set) if truth_set else 0.0
+        true_positives = len(predicted_set & truth_set)
+        precision = true_positives / len(predicted_set) if predicted_set else 0.0
+        recall = true_positives / len(truth_set) if truth_set else 0.0
         f1 = (
             2 * precision * recall / (precision + recall)
             if precision + recall
@@ -220,6 +335,8 @@ def save_results_excel(
                     max(len(str(cell.value or "")) for cell in column_cells) + 2,
                     80,
                 )
-                worksheet.column_dimensions[column_cells[0].column_letter].width = width
+                worksheet.column_dimensions[
+                    column_cells[0].column_letter
+                ].width = width
 
     return output_path
