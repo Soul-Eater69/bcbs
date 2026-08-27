@@ -11,7 +11,8 @@ Controlled ablation experiments for L3 business capability selection.
 - `04_no_theme.ipynb` — Epic + Stage + L3 only.
 - `05_full_with_hierarchy.ipynb` — full context + L1/L2 hierarchy.
 
-The same production system prompt is used in all five notebooks. Only the user-context payload changes.
+The production `SYSTEM_PROMPT` is byte-identical in all five notebooks. Only the
+intended user-context fields change.
 
 ## Candidate L3 fields
 
@@ -29,7 +30,32 @@ Experiment 5 adds:
 
 ## Inputs
 
-The notebooks expect your existing exports/data sources for Theme, Epic, Value Stream Stage, Stage→Capability mapping, capability master, and Jira L3 ground truth. Update the file-path constants in the first configuration cell if your filenames differ.
+Input paths are explicit in the first configuration cell of every notebook. By
+default the notebooks look in `L3_EXPERIMENT_DATA_DIR` (or the current directory)
+for:
+
+- `epic_gen.csv`
+- `value_stream_stages.xlsx`
+- `stage_capability_map.xlsx`
+- `capability_master.xlsx`
+- `jira_ground_truth.csv`
+
+Set the corresponding `L3_THEME_PATH`, `L3_STAGE_PATH`,
+`L3_STAGE_CAPABILITY_MAP_PATH`, `L3_CAPABILITY_MASTER_PATH`, or
+`L3_GROUND_TRUTH_PATH` environment variable when an export has another name or
+location.
+
+Jira and the internal LLM gateway continue to use the existing environment-based
+configuration (`JIRA_BASE_URL`, Jira authentication variables, and
+`IDP_GATEWAY_FACTORY`). No credentials are stored in the notebooks.
+
+## Single-example inspection
+
+Set `INSPECTION_THEME_ID` and `INSPECTION_EPIC_KEY` in a notebook's configuration
+cell, then run through the inspection section. It displays the actual system
+prompt, serialized user payload, ordered candidates, raw model response, and
+validated prediction before batch execution. Ground truth is not loaded until
+the separate evaluation section.
 
 ## Evaluation
 

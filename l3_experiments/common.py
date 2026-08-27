@@ -87,6 +87,9 @@ def validate_l3_response(
     max_selected: int = 3,
 ) -> list[dict[str, str]]:
     """Validate the strict L3 output contract and return normalized selections."""
+    if set(payload) != {"l3"}:
+        raise ValueError("LLM response must contain exactly one top-level field: l3.")
+
     raw = payload.get("l3")
     if not isinstance(raw, list):
         raise ValueError("LLM response must contain an 'l3' list.")
@@ -102,6 +105,10 @@ def validate_l3_response(
     for index, selection in enumerate(raw, start=1):
         if not isinstance(selection, Mapping):
             raise ValueError(f"L3 selection #{index} must be a JSON object.")
+        if set(selection) != {"capability_id", "reason"}:
+            raise ValueError(
+                f"L3 selection #{index} must contain exactly capability_id and reason."
+            )
 
         capability_id = str(selection.get("capability_id", "")).strip()
         reason = str(selection.get("reason", "")).strip()
