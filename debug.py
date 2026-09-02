@@ -22,7 +22,7 @@ Each Stage's name, description, entrance criteria, and exit criteria define that
 Stage metadata is a boundary and disambiguation mechanism only.
 Stage metadata must NOT by itself establish that an L3 capability is required.
 
-Positive evidence for selecting an L3 must originate from Theme Business Needs or from Theme Description when it clearly clarifies those Business Needs.
+Positive evidence for selecting an L3 must originate from Theme Business Needs or Theme Description when it clearly clarifies those Business Needs.
 
 For each candidate L3:
 - capability_id is the exact identifier to return when selected.
@@ -40,33 +40,42 @@ For each Stage independently:
 
 2. Use Theme Description to clarify the meaning, scope, or intent of those functions.
 
-3. Use the Stage name, Stage description, entrance criteria, and exit criteria to determine whether each business function falls within this Stage boundary.
+3. Use the Stage name, Stage description, entrance criteria, and exit criteria only to determine whether those functions fall within this Stage boundary.
 
 4. Evaluate EVERY supplied candidate L3 independently.
 
-Select a candidate when its business function is:
+Select a candidate only when the Theme context provides concrete semantic evidence that the candidate's business function is required.
+
+A candidate may be selected when its business function is:
 
 - explicitly required by the Theme context, OR
 
 - strongly semantically entailed by a concrete requirement, outcome, activity, responsibility, or intended business behavior in the Theme context.
 
-Strong semantic entailment means that the stated business requirement would reasonably remain incomplete or uncovered without the business function represented by that capability.
+Strong semantic entailment means the Theme requirement would reasonably remain incomplete or insufficiently covered without that candidate's business function.
 
 The exact capability name or terminology does not need to appear in the Theme text.
 
-The Theme also does not need to describe the candidate's complete capability definition.
+The Theme does not need to describe the candidate's entire capability definition.
 A candidate may be selected when the Theme clearly requires a meaningful business function contained within that capability's semantic definition.
+
+However, partial semantic overlap alone is NOT sufficient.
+
+A capability is not relevant merely because some portion of its description could be associated with the Theme.
+There must be a concrete Theme requirement that actually requires the business function represented by the capability.
 
 Selecting one capability does not automatically justify selecting another capability.
 
-If multiple distinct business functions are genuinely supported, return all of the supported candidates.
+If multiple distinct business functions are genuinely required, return all supported candidates.
 
 DO NOT SELECT A CANDIDATE ONLY BECAUSE:
 
 - it belongs to the supplied Stage,
 - it shares words or terminology with the Theme,
+- it appears compatible with the Theme,
 - it is generally related to the Theme,
-- it would be useful in the same workflow,
+- it would commonly occur in the same business process,
+- it would be useful for implementing another selected capability,
 - it commonly supports another selected capability,
 - it is a prerequisite,
 - it is enabling,
@@ -74,7 +83,11 @@ DO NOT SELECT A CANDIDATE ONLY BECAUSE:
 - it is adjacent to a supported capability,
 - it is a typical function performed within that Stage.
 
-A capability must have its own concrete semantic support from the Theme context.
+Compatibility is not evidence.
+Association is not evidence.
+Stage membership is not evidence.
+
+A candidate must have its own concrete functional support from the Theme context.
 
 Do not use one Stage's metadata or candidates as evidence for another Stage.
 
@@ -82,17 +95,27 @@ FINAL PRECISION CHECK
 
 Before producing the final answer, review EVERY selected candidate again.
 
-For each selected candidate, ask:
+For each selected candidate:
 
-"What specific business requirement, outcome, activity, responsibility, or intended behavior in the Theme context requires this capability?"
+1. Identify the specific Theme requirement, outcome, activity, responsibility, or intended business behavior that supports it.
 
-If there is no concrete answer grounded in Theme Business Needs or Theme Description, REMOVE that candidate.
+2. Ask:
 
-Do not keep a candidate merely because its capability description appears compatible with the Stage.
+"Does that Theme evidence genuinely REQUIRE this capability's business function, or is the capability merely compatible, related, adjacent, or commonly associated with the requirement?"
 
-When two candidates overlap semantically, keep both only when the Theme context provides distinct business evidence supporting both functions.
+3. Keep the candidate only if the answer is clearly that the business function is required or strongly entailed.
 
-Prefer complete coverage of genuinely supported business functions, but do not expand beyond what the Theme actually requires.
+If there is no concrete Theme evidence you can point to, REMOVE the candidate.
+
+If the relationship is only plausible, compatible, related, adjacent, enabling, upstream, downstream, prerequisite, or commonly associated, REMOVE the candidate.
+
+When two selected candidates overlap semantically, keep both only when the Theme context provides distinct functional evidence supporting both.
+
+If one Theme requirement is fully explained by one capability, do not add a second overlapping capability unless the Theme contains additional evidence for that second function.
+
+When uncertain between selecting and excluding a candidate, exclude it unless the Theme contains concrete functional evidence.
+
+Prefer complete coverage of genuinely required business functions, but do not expand beyond what the Theme actually requires.
 
 OUTPUT RULES
 
