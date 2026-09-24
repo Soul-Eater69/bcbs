@@ -1,13 +1,14 @@
-**Description**
+Hi team,
 
-As an IDP user,
+The recent TEG data update fixed the issue where linked themes were showing as zero.
 
-I need Engagement Requests with zero linked themes to be excluded from the ingestion process,
+Here’s what we’re currently bringing in, based on the statuses we gathered from the SMEs:
 
-So that only valid and relevant Engagement Requests are displayed under Similar Engagement Requests.
+* **Engagement requests:** All statuses except New Request, Cancelled, and Blocked
+* **Themes:** Implemented only
+* **Epics:** All statuses except Cancelled
 
-Currently, some Engagement Requests are being ingested into the AI Search index and Cosmos DB even though they have no linked themes. As a result, these ERs are returned as similar recommendations in the UI, but the **View Linked Themes** count is displayed as zero.
+We’re checking with the users again to make sure these are the statuses they need. They mentioned that In Progress themes may be useful too, so we’ll confirm that and share any changes.
 
-Because the similarity workflow depends on the themes associated with an Engagement Request, an ER without any themes does not provide useful information for comparison. The ingestion process should therefore confirm that an ER has at least one valid linked theme before storing it in AI Search and Cosmos DB.
-
-If an ER has no linked themes, it should be skipped during ingestion and should not appear in the Similar Engagement Requests results.
+Thanks,
+Ramesh
