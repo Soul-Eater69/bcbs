@@ -1,14 +1,6 @@
-Hi team,
+I want to know whether the CLIENT_ID setting can be safely changed from a single string to a list of client IDs.
 
-The recent TEG data update fixed the issue where linked themes were showing as zero.
-
-Here’s what we’re currently bringing in, based on the statuses we gathered from the SMEs:
-
-* **Engagement requests:** All statuses except New Request, Cancelled, and Blocked
-* **Themes:** Implemented only
-* **Epics:** All statuses except Cancelled
-
-We’re checking with the users again to make sure these are the statuses they need. They mentioned that In Progress themes may be useful too, so we’ll confirm that and share any changes.
-
-Thanks,
-Ramesh
+1. Find every place CLIENT_ID is defined, read, or referenced in this repo, including settings/config classes, .env files, env templates, Docker/Helm/pipeline configs, tests, and any shared packages like pkg/idp_common.
+2. For each usage, tell me the file, the line, and what it is used for (for example JWT audience validation, ForgeRock/OAuth calls, outgoing request headers, logging, or returning config to a frontend).
+3. Tell me whether each usage expects a single string or would also work with a list.
+4. Conclude: is CLIENT_ID used ONLY for the JWT audience check in jwt.decode(..., audience=...)? If yes, say it can be replaced by one list. If no, list the usages that need it to stay a single value.
