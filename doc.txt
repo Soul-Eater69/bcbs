@@ -1,36 +1,62 @@
-Only 3 of 734 ERs (0.4%) have a file named as a value card, so file names aren’t a reliable identifier. For Q6 in the report, write that VC naming exists but is rarely used, and that value cards need to be identified another way.
+CONTEXT
+I'm doing EDA on SharePoint intake folders ("02 Intake Artifacts") to decide what feeds an IDP Theme Gen RAG pipeline. Each top-level folder = one ER (Work Entry), named "Work ID_Work Entry Name" or "Work ID – Work Entry Name". Inside, BAs may use "Finalized Artifacts" and "Working Artifacts" subfolders (with optional nested subfolders).
 
-Before you settle on that, two checks could change the count.
+Inputs already in this workspace:
+- sharepoint_eda_metadata.csv (full metadata inventory, 4,199 files, 734 ERs with files, 782 ERs total)
+- sharepoint_eda_sample_100.csv (previous content sample)
+- the existing Graph download/extraction helpers in this notebook
+First, inspect the metadata CSV and tell me the actual column names (ER, status, extension, size, file name, full path, modified date). Use them; do not guess.
 
-1. The regex may be missing files
+NEW SCOPE FROM THE BUSINESS (this overrides earlier assumptions)
+- NEEDED: Value Card / Value Case (.pptx; replaces the older Idea Card), architecture docs CA (Candidate Architecture) and DA (Data Architecture), and supporting files such as kickoff slides and notes.
+- NOT NEEDED: Gate 0 / Gate 1 estimate workbooks (these include ClassicHEM / SlimHEM files), the Stakeholder Engagement Workbook, and the BOM (Bill of Materials). Excel files (.xlsx, .xlsm, .xls, .xlsb, .csv) are out of scope entirely.
+- Images ARE in scope, because CA/DA documents contain diagrams.
+- Proposed rule: read only "Finalized Artifacts". If an ER has no files, fall back to the Planview Work Entry details. This rule is NOT yet confirmed.
+- Value Case reference example: "Zest_Dermatology_Value Case.pptx".
 
-\b treats underscores as part of a word, so names like I0102679_VC_Grievance or 2026_VC.xlsm don’t match. Also check folder paths, not just file names:
+TASKS. Run in order. Checks 1–3 are metadata-only and must not download any files.
 
-python
-pat = r"(?<![A-Za-z])VC(?![A-Za-z])|value\s*card|valuecard"
-hits = m[m["name"].str.contains(pat, case=False, regex=True) |
-         m["path"].str.contains(pat, case=False, regex=True)]
-print(len(hits), hits["er"].nunique())
-print(hits[["er", "name", "extension"]].head(30).to_string())
-2. Identify value cards by content instead of name
+1. DOC-TYPE CLASSIFICATION (by file name)
+Classify each file with case-insensitive regex. Rules are checked in this order and the first match wins, so a "VC … Gate 0 Estimate.docx" file counts as a gate file:
+  x_gate: gate\s*[01] | \bG[01]\b | ClassicHEM | SlimHEM | \bHEM\b | estimate
+  x_stakeholder: stakeholder\s*engagement
+  x_bom: \bBOM\b | bill\s*of\s*material
+  value_card: value\s*(card|case) | idea\s*card | (?<![A-Za-z])VC(?![A-Za-z])
+  arch_ca: candidate\s*arch | (?<![A-Za-z])CA(?![A-Za-z])
+  arch_da: data\s*arch | (?<![A-Za-z])DA(?![A-Za-z])
+  kickoff: kick\s*-?\s*off
+  brd: \bBRD\b | business\s*requirement
+  else: other
+Define in_scope = NOT Excel AND doc_type does not start with "x_".
+Output:
+- A table with files, ERs, and files per status for each doc_type.
+- 10 example file names per doc_type, so I can spot false positives. Flag any suspicious CA/DA/VC abbreviation matches.
+- Template files with placeholder IDs (I0000000, I000000, P000XXXXX) or "template" in the name, listed separately and excluded from the counts.
 
-The 4 templates you found (VC 1099 Tax Template – ClassicHEM/SlimHEM) are the best lead. If value cards are filled-in copies of a template, they’ll share its structure even when renamed:
+2. COVERAGE BY FOLDER POLICY
+For each policy, report the number and % of ERs, out of both 734 and 782, that have at least 1 in-scope file:
+  A: Finalized only
+  B: Finalized; if it has nothing in scope, Working
+  C: any folder, including files at the ER root or outside Finalized/Working
+Also report, under each policy, the ERs with at least 1 value_card, arch_ca, and arch_da file.
+Also count the ERs that would fall back to Planview under policy A, and how many of those actually have in-scope files elsewhere. This is the key number.
 
-For .xlsm/.xlsx: compare sheet names and header cells against the template’s. Pulling just the sheet names with openpyxl (read-only) is cheap, even across all 1,600 spreadsheets.
-For .pptx: compare slide titles or layout names.
-python
-from openpyxl import load_workbook
-wb = load_workbook(path, read_only=True)
-print(wb.sheetnames)   # compare with the template's sheet list
+3. FOLDER DEPTH
+For files under Finalized or Working, give the distribution of subfolder depth below that folder (0 means directly inside it). Also list the 10 most common subfolder names at depth 1.
 
-If many workbooks share the template’s sheet names, you’ve found the real value cards, and the result answers Q6 better than any naming rule.
+4. TOKENS FOR IN-SCOPE FILES ONLY (content)
+Draw a NEW stratified sample of about 100 in-scope files across ALL ERs, not just recent ones. Stratify by doc_type × extension × status, use a fixed seed, and always include every value_card, arch_ca, and arch_da file if there are fewer than 30 of each. Download each file to memory first (BytesIO); do NOT parse through the range reader. Count tokens with tiktoken cl100k_base.
+Output:
+- Tokens per file (median, p90, max), by doc_type and by extension.
+- Estimated in-scope tokens per ER under policies A and C (median, p90, max).
+- Extraction failures with their reasons.
 
-What this means for the RAG design
+5. EMBEDDED IMAGES (same sample as task 4)
+For .pptx/.docx, count the files under ppt/media/ or word/media/ in the zip, and their total bytes. For .pdf, count images per page with pypdf page.images. Report images per file by doc_type, and the % of CA/DA files that contain images.
 
-With no reliable Finalized folder (only 27% of ERs have one) and no reliable VC naming (0.4%), the pipeline can’t depend on folder or file names to pick each ER’s authoritative document. Your options:
-
-Template fingerprint matching, as in check 2
-Fall back to the latest modified file per ER and type
-Ask the business where value cards actually live. They may be stored in another library or system altogether, which is also worth knowing.
-
-Run check 1 first. If the count stays near 3, send me the template’s sheet names and I’ll write the fingerprint-matching scan.
+RULES
+- Never print or save document text. Print counts, file names, and stats only.
+- Save outputs as eda2_doc_types.csv, eda2_coverage.csv, eda2_depth.csv, eda2_inscope_sample.csv, and eda2_images.csv.
+- Do NOT edit sharepoint_eda_report.md yet.
+- If any step will take more than about 15 minutes, stop and tell me the estimate first.
+- At the end, give me a summary of no more than 10 lines: coverage under A/B/C, value card / CA / DA counts, median tokens per ER, image prevalence, and anything surprising.
