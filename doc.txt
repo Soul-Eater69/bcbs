@@ -1,34 +1,18 @@
-Tier 1: Metadata on everything (all folders, no file content)
+import pandas as pd
+m = pd.read_csv("sharepoint_eda_metadata.csv")   # expects: er, status, extension, size_bytes, name
 
-A Graph folder listing gives you this without downloading any files:
+# 5a: files per ER distribution
+per_er = m.groupby("er").size()
+print(per_er.describe(percentiles=[.5, .9]).round(1))
 
-File count per folder, extensions, sizes, created and modified dates, depth, path patterns
-Total volume by extension, by count and by bytes
-Outliers: very large files, empty folders, folders with hundreds of files
-Duplicates (same name and size, or the file hash if Graph returns it)
-Unsupported or junk types: .zip, images, .tmp, ~$ lock files
+# Finalized/Working structure per ER
+s = m.groupby("er")["status"].agg(set)
+has_f = s.apply(lambda x: "Finalized" in x); has_w = s.apply(lambda x: "Working" in x)
+print(pd.Series({"both": (has_f & has_w).mean(), "finalized_only": (has_f & ~has_w).mean(),
+                 "working_only": (~has_f & has_w).mean(), "neither": (~has_f & ~has_w).mean()}).round(3))
 
-This tells you what you actually have to parse and where to focus. In most corpora, 3–5 extensions cover over 90% of the volume.
+# File types by status
+print(pd.crosstab(m["extension"], m["status"], margins=True).sort_values("All", ascending=False).head(8))
 
-Tier 2: Content on a stratified sample
-
-Pick files by extension × size bucket × folder type, not uniformly at random. Otherwise rare formats never show up in the sample, and those are exactly the ones that break the parser.
-
-About 20–50 files per major extension, plus a few from each rare one
-Deliberately include the largest files and the oldest ones (old Office formats, scanned PDFs)
-Spread the sample across many folders, not all from a handful
-
-For each sampled file, measure:
-
-Did extraction succeed or fail?
-Character count, and characters per page for PDFs. A count near 0 means a scanned PDF that needs OCR.
-Language, encoding problems, boilerplate share (email signatures, disclaimers, headers and footers)
-Structure: tables, attachments inside .msg files, embedded images
-Extraction time per file, so you can project the cost of the full run
-Why not run content EDA on all 700?
-Your MSG/PDF test took over 60 minutes for two files over range reads. Extrapolated across thousands of files, that’s days of runtime and heavy Graph throttling.
-Once the sample is saturated, meaning new files aren’t revealing new failure modes, more EDA tells you nothing new. The full pass happens during ingestion anyway, so log extraction stats there and you get full-corpus content EDA for free.
-Practical tips
-Persist the Tier 1 inventory as a parquet or CSV. It becomes your ingestion manifest and your sampling frame.
-Download sampled files to local bytes before parsing; don’t parse through the range reader.
-If folders map to clients, projects, or document types, make sure the sample covers each group, since retrieval quality often varies by group.
+# Q6: value-card naming check
+print(m[m["name"].str.contains(r"value\s*card|\bVC\b", case=False, regex=True)]["name"].head(20))
