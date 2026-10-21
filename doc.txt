@@ -1,7 +1,36 @@
-vc = m[m["name"].str.contains(r"\bVC\b|value\s*card", case=False, regex=True)]
-is_template = vc["name"].str.contains(r"I0{6,7}\b|template", case=False, regex=True)
-vc_real = vc[~is_template]
+Only 3 of 734 ERs (0.4%) have a file named as a value card, so file names aren’t a reliable identifier. For Q6 in the report, write that VC naming exists but is rarely used, and that value cards need to be identified another way.
 
-print("VC files:", len(vc), "| templates:", is_template.sum(), "| real:", len(vc_real))
-print("ERs with ≥1 VC:", vc_real["er"].nunique(), "of", m["er"].nunique())
-print(pd.crosstab(vc_real["extension"], vc_real["status"], margins=True))
+Before you settle on that, two checks could change the count.
+
+1. The regex may be missing files
+
+\b treats underscores as part of a word, so names like I0102679_VC_Grievance or 2026_VC.xlsm don’t match. Also check folder paths, not just file names:
+
+python
+pat = r"(?<![A-Za-z])VC(?![A-Za-z])|value\s*card|valuecard"
+hits = m[m["name"].str.contains(pat, case=False, regex=True) |
+         m["path"].str.contains(pat, case=False, regex=True)]
+print(len(hits), hits["er"].nunique())
+print(hits[["er", "name", "extension"]].head(30).to_string())
+2. Identify value cards by content instead of name
+
+The 4 templates you found (VC 1099 Tax Template – ClassicHEM/SlimHEM) are the best lead. If value cards are filled-in copies of a template, they’ll share its structure even when renamed:
+
+For .xlsm/.xlsx: compare sheet names and header cells against the template’s. Pulling just the sheet names with openpyxl (read-only) is cheap, even across all 1,600 spreadsheets.
+For .pptx: compare slide titles or layout names.
+python
+from openpyxl import load_workbook
+wb = load_workbook(path, read_only=True)
+print(wb.sheetnames)   # compare with the template's sheet list
+
+If many workbooks share the template’s sheet names, you’ve found the real value cards, and the result answers Q6 better than any naming rule.
+
+What this means for the RAG design
+
+With no reliable Finalized folder (only 27% of ERs have one) and no reliable VC naming (0.4%), the pipeline can’t depend on folder or file names to pick each ER’s authoritative document. Your options:
+
+Template fingerprint matching, as in check 2
+Fall back to the latest modified file per ER and type
+Ask the business where value cards actually live. They may be stored in another library or system altogether, which is also worth knowing.
+
+Run check 1 first. If the count stays near 3, send me the template’s sheet names and I’ll write the fingerprint-matching scan.
