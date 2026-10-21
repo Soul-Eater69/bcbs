@@ -1,18 +1,7 @@
-import pandas as pd
-m = pd.read_csv("sharepoint_eda_metadata.csv")   # expects: er, status, extension, size_bytes, name
+vc = m[m["name"].str.contains(r"\bVC\b|value\s*card", case=False, regex=True)]
+is_template = vc["name"].str.contains(r"I0{6,7}\b|template", case=False, regex=True)
+vc_real = vc[~is_template]
 
-# 5a: files per ER distribution
-per_er = m.groupby("er").size()
-print(per_er.describe(percentiles=[.5, .9]).round(1))
-
-# Finalized/Working structure per ER
-s = m.groupby("er")["status"].agg(set)
-has_f = s.apply(lambda x: "Finalized" in x); has_w = s.apply(lambda x: "Working" in x)
-print(pd.Series({"both": (has_f & has_w).mean(), "finalized_only": (has_f & ~has_w).mean(),
-                 "working_only": (~has_f & has_w).mean(), "neither": (~has_f & ~has_w).mean()}).round(3))
-
-# File types by status
-print(pd.crosstab(m["extension"], m["status"], margins=True).sort_values("All", ascending=False).head(8))
-
-# Q6: value-card naming check
-print(m[m["name"].str.contains(r"value\s*card|\bVC\b", case=False, regex=True)]["name"].head(20))
+print("VC files:", len(vc), "| templates:", is_template.sum(), "| real:", len(vc_real))
+print("ERs with ≥1 VC:", vc_real["er"].nunique(), "of", m["er"].nunique())
+print(pd.crosstab(vc_real["extension"], vc_real["status"], margins=True))
