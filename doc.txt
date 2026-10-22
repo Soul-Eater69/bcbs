@@ -1,9 +1,6 @@
-Standardise the Finalized rule and re-run. Do not edit the report.
-
-RULE: a file is "Finalized" only if the FIRST folder below its ER folder is named exactly "Finalized Artifacts" (case-insensitive, trim spaces), i.e. path = <ER folder>/Finalized Artifacts/... . Files in subfolders under that folder still count. A "Finalized Artifacts" folder anywhere deeper does NOT count. Same rule for "Working Artifacts". Everything else is "Other".
-
-1. Recompute the status column in sharepoint_eda_metadata.csv with this rule (keep the old column as status_old).
-2. Show a crosstab of status_old vs the new status (file counts and ER counts). List up to 20 paths that were Finalized before but are not under <ER>/Finalized Artifacts, and any "Finalized Artifacts" folders found below the top level.
-3. Recount: ERs with ≥1 file in <ER>/Finalized Artifacts; ERs with ≥1 in-scope file there; the folder-structure split (Finalized only / Working only / both / neither) for the 734 ERs with files; and coverage under rules A, B and C.
-4. If the target ER set differs from the 136 ERs in the last run, re-run the full Finalized analysis (files per ER, file types, value card / idea card, tokens, images) on the new set, reusing eda4_finalized_tokens.csv for files already processed.
-5. Give a short before/after table of every headline number that changed.
+For the strict Finalized set (117 ERs, files under <ER>/Finalized Artifacts), using existing results only (no new downloads unless missing):
+1. In-scope and excluded files by extension and by category, with file and ER counts.
+2. Usable (in-scope) files per ER: mean, median, p90, max, and buckets 0 / 1 / 2–3 / 4–5 / 6–10 / 11+.
+3. Tokens per ER: mean and max, plus the 10 largest ERs.
+4. Card counts: files and ERs matching value\s*card, idea\s*card, and value\s*case, reported separately. Confirm which pattern gave "6 files / 5 ERs".
+5. Embedded images per ER: mean, median, p90, and % of files with images.
