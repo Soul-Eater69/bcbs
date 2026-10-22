@@ -1,21 +1,12 @@
-Validate the doc_type classification before reporting. Do not edit the report.
+vc = m[m["in_scope"] & ~m["name"].str.contains(r"I0{6,7}\b|template", case=False, regex=True)]
+pats = {
+    "value card": r"value\s*card",
+    "idea card":  r"idea\s*card",
+    "value case": r"value\s*case",   # for reference only, see note below
+}
+for label, p in pats.items():
+    hit = vc["name"].str.contains(p, case=False, regex=True)
+    print(f"{label:11} files={hit.sum():4}  ERs={vc.loc[hit, 'er'].nunique()}")
 
-1. For value_card, arch_ca, arch_da: draw a random sample of 25 file names each (fixed seed; use all files if fewer than 25). Show name, path (last 2 folders), extension, status. I will label them.
-2. Propose tighter regexes for CA and DA that require context, e.g.:
-   CA: candidate\s*arch | (^|[\s_\-])CA([\s_\-]+v?\d|[\s_\-]*\.(pptx|docx|pdf|vsdx)$)
-   DA: data\s*arch | (^|[\s_\-])DA([\s_\-]+v?\d|[\s_\-]*\.(pptx|docx|pdf|vsdx)$)
-   For value_card, keep "value case|value card|idea card", but count bare "VC" matches separately.
-3. Recompute the file/ER counts for value_card, arch_ca, arch_da with the tight rules. Show the loose and tight counts side by side, and list the 15 files dropped by tightening.
-4. Print the folder-depth distribution below Finalized/Working from the earlier run (depth 0, 1, 2, 3+), plus the top 10 depth-1 subfolder names.
-5. Give coverage under policy C with priority ordering (Finalized > Working > root): for each ER, which tier supplied its in-scope files. Report ER counts per tier.
-
-Once you’ve spot-checked the 75 names and have the tight counts, send them here. I’ll draft the final one-page report, organized around coverage, document types, tokens, images, and open decisions, plus a short note to Sanjay on why the Finalized-only rule needs to be revisited.
-
-
-For the in-scope sample (eda2_inscope_sample.csv), analyze embedded images. Do not print document content.
-1. For each image in .pptx/.docx (zip media folder) and .pdf (pypdf page.images), record: file, doc_type, width, height, bytes, sha256.
-2. Classify: duplicate (sha256 seen before within the same ER), small (<10KB or min side <150px), meaningful (everything else).
-3. Report per doc_type and per ER: total, duplicate, small, and meaningful image counts (median, p90).
-4. Estimate image tokens per ER two ways: (a) caption approach = meaningful_images × 300; (b) direct vision = meaningful_images × 800. Show the text-only median/p90 tokens per ER next to text+image totals for both approaches.
-5. Count pptx slides where text is under 20 characters but there is a meaningful image (likely screenshots that need OCR or vision).
-6. Save as eda2_image_detail.csv. Do not edit the report.
+both = vc["name"].str.contains(r"value\s*card|idea\s*card", case=False, regex=True)
+print(f"value OR idea card  files={both.sum()}  ERs={vc.loc[both, 'er'].nunique()}")
