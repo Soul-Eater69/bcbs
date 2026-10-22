@@ -1,44 +1,9 @@
-FULL ANALYSIS: ERs WITH A FINALIZED FOLDER. Do not edit any report. Never print or save document text.
+Standardise the Finalized rule and re-run. Do not edit the report.
 
-SCOPE
-- Use sharepoint_eda_metadata.csv. Target ERs = ERs with at least one file whose path is inside a folder named like "Finalized" (case-insensitive, any depth).
-- Analyse only files inside the Finalized folder(s) of those ERs, including their subfolders.
-- In-scope = not Excel (.xlsx/.xlsm/.xls/.xlsb/.csv), not Gate 0/1 estimates (gate\s*[01], ClassicHEM, SlimHEM, estimate), not Stakeholder Engagement Workbook, not BOM, not templates (I0000000, I000000, "template").
+RULE: a file is "Finalized" only if the FIRST folder below its ER folder is named exactly "Finalized Artifacts" (case-insensitive, trim spaces), i.e. path = <ER folder>/Finalized Artifacts/... . Files in subfolders under that folder still count. A "Finalized Artifacts" folder anywhere deeper does NOT count. Same rule for "Working Artifacts". Everything else is "Other".
 
-1. OVERVIEW
-- Number of target ERs (out of 782 total and 734 with files).
-- Number of target ERs whose Finalized folder has 0 in-scope files (only excluded types).
-- Total Finalized files, and in-scope Finalized files.
-
-2. FILES PER ER (Finalized folder only)
-- All files per ER, and in-scope ("usable") files per ER: mean, median, p90, max.
-- Distribution buckets of usable files per ER: 0, 1, 2–3, 4–5, 6–10, 11+.
-
-3. FILE TYPES
-- Count of files and ERs by extension, and by category (Presentations, PDF, Word, Email, Spreadsheet, Images, Other), split into in-scope vs excluded.
-- Count of excluded files by reason (Excel, gate estimate, stakeholder, BOM, template).
-
-4. VALUE CARD / IDEA CARD (by file name, case-insensitive)
-- value_card: names containing "value card" (value\s*card)
-- idea_card: names containing "idea card" (idea\s*card)
-- Do NOT count bare "VC".
-- Report for each: files and ERs. Also: ERs with value card only, idea card only, both, neither.
-- For reference only (not counted as value card): names containing "value case" — files and ERs.
-- List up to 20 matched file names per category so I can spot-check.
-
-5. TOKENS (all in-scope Finalized files, no sampling)
-- Download each file to memory (BytesIO), extract text only (no image extraction), count tokens with tiktoken cl100k_base.
-- Per ER: sum tokens across its in-scope Finalized files. Report number of ERs, mean, median, p90, max, and count and % of ERs over 24,000 tokens.
-- Tokens per file by extension and by doc type (value card / idea card / other): mean, median, p90.
-- List the 10 largest ERs by tokens, with file count and largest file.
-- Use 4 parallel workers; honour Retry-After on 429/503; retry failures up to 3 times. Checkpoint each result to eda4_finalized_tokens.csv and skip item_ids already done so the run can resume.
-- Report extraction failures by extension and reason.
-- First run 30 files and report average seconds per file and a projected total time, then continue.
-
-6. EMBEDDED IMAGES (counts only, same files as step 5)
-- For .pptx/.docx count media files in the zip; for .pdf count page images. Report images per ER (mean, median, p90) and the share of files that contain images.
-
-OUTPUTS
-- eda4_finalized_ers.csv (one row per target ER: files, usable files, value card / idea card flags, tokens, images)
-- eda4_finalized_files.csv (one row per file)
-- Finish with a summary of no more than 12 lines covering every section above.
+1. Recompute the status column in sharepoint_eda_metadata.csv with this rule (keep the old column as status_old).
+2. Show a crosstab of status_old vs the new status (file counts and ER counts). List up to 20 paths that were Finalized before but are not under <ER>/Finalized Artifacts, and any "Finalized Artifacts" folders found below the top level.
+3. Recount: ERs with ≥1 file in <ER>/Finalized Artifacts; ERs with ≥1 in-scope file there; the folder-structure split (Finalized only / Working only / both / neither) for the 734 ERs with files; and coverage under rules A, B and C.
+4. If the target ER set differs from the 136 ERs in the last run, re-run the full Finalized analysis (files per ER, file types, value card / idea card, tokens, images) on the new set, reusing eda4_finalized_tokens.csv for files already processed.
+5. Give a short before/after table of every headline number that changed.
