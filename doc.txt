@@ -1,12 +1,44 @@
-vc = m[m["in_scope"] & ~m["name"].str.contains(r"I0{6,7}\b|template", case=False, regex=True)]
-pats = {
-    "value card": r"value\s*card",
-    "idea card":  r"idea\s*card",
-    "value case": r"value\s*case",   # for reference only, see note below
-}
-for label, p in pats.items():
-    hit = vc["name"].str.contains(p, case=False, regex=True)
-    print(f"{label:11} files={hit.sum():4}  ERs={vc.loc[hit, 'er'].nunique()}")
+FULL ANALYSIS: ERs WITH A FINALIZED FOLDER. Do not edit any report. Never print or save document text.
 
-both = vc["name"].str.contains(r"value\s*card|idea\s*card", case=False, regex=True)
-print(f"value OR idea card  files={both.sum()}  ERs={vc.loc[both, 'er'].nunique()}")
+SCOPE
+- Use sharepoint_eda_metadata.csv. Target ERs = ERs with at least one file whose path is inside a folder named like "Finalized" (case-insensitive, any depth).
+- Analyse only files inside the Finalized folder(s) of those ERs, including their subfolders.
+- In-scope = not Excel (.xlsx/.xlsm/.xls/.xlsb/.csv), not Gate 0/1 estimates (gate\s*[01], ClassicHEM, SlimHEM, estimate), not Stakeholder Engagement Workbook, not BOM, not templates (I0000000, I000000, "template").
+
+1. OVERVIEW
+- Number of target ERs (out of 782 total and 734 with files).
+- Number of target ERs whose Finalized folder has 0 in-scope files (only excluded types).
+- Total Finalized files, and in-scope Finalized files.
+
+2. FILES PER ER (Finalized folder only)
+- All files per ER, and in-scope ("usable") files per ER: mean, median, p90, max.
+- Distribution buckets of usable files per ER: 0, 1, 2–3, 4–5, 6–10, 11+.
+
+3. FILE TYPES
+- Count of files and ERs by extension, and by category (Presentations, PDF, Word, Email, Spreadsheet, Images, Other), split into in-scope vs excluded.
+- Count of excluded files by reason (Excel, gate estimate, stakeholder, BOM, template).
+
+4. VALUE CARD / IDEA CARD (by file name, case-insensitive)
+- value_card: names containing "value card" (value\s*card)
+- idea_card: names containing "idea card" (idea\s*card)
+- Do NOT count bare "VC".
+- Report for each: files and ERs. Also: ERs with value card only, idea card only, both, neither.
+- For reference only (not counted as value card): names containing "value case" — files and ERs.
+- List up to 20 matched file names per category so I can spot-check.
+
+5. TOKENS (all in-scope Finalized files, no sampling)
+- Download each file to memory (BytesIO), extract text only (no image extraction), count tokens with tiktoken cl100k_base.
+- Per ER: sum tokens across its in-scope Finalized files. Report number of ERs, mean, median, p90, max, and count and % of ERs over 24,000 tokens.
+- Tokens per file by extension and by doc type (value card / idea card / other): mean, median, p90.
+- List the 10 largest ERs by tokens, with file count and largest file.
+- Use 4 parallel workers; honour Retry-After on 429/503; retry failures up to 3 times. Checkpoint each result to eda4_finalized_tokens.csv and skip item_ids already done so the run can resume.
+- Report extraction failures by extension and reason.
+- First run 30 files and report average seconds per file and a projected total time, then continue.
+
+6. EMBEDDED IMAGES (counts only, same files as step 5)
+- For .pptx/.docx count media files in the zip; for .pdf count page images. Report images per ER (mean, median, p90) and the share of files that contain images.
+
+OUTPUTS
+- eda4_finalized_ers.csv (one row per target ER: files, usable files, value card / idea card flags, tokens, images)
+- eda4_finalized_files.csv (one row per file)
+- Finish with a summary of no more than 12 lines covering every section above.
