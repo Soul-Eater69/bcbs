@@ -1,17 +1,18 @@
-Review: CoreAPI token validation changes for PlanetHCSC integration
+Review: DeliA token validation changes for PlanetHCSC integration
+
 Hi Deba,
 
-Please find attached the proposal for enabling PlanetHCSC to call CoreAPI, for your review.
+Please find attached the proposal for enabling PlanetHCSC to integrate with the DeliA API, for your review.
 
-Brief context: PlanetHCSC is integrating DeliA capabilities into its mobile app. Its users sign in through PlanetHCSC's own ForgeRock client, and CoreAPI currently rejects these tokens even though they are valid. We found two causes:
+Brief context: PlanetHCSC is integrating DeliA capabilities into its mobile app. Its users sign in through PlanetHCSC's own ForgeRock client, and the DeliA API currently rejects these tokens even though they are valid. We found two causes:
 
-1. Issuer: CoreAPI validates the token issuer against a hard-coded list, and PlanetHCSC's issuer is not on it. Proposed fix: verify every token through SEC Token Verify (v6), as recommended by the API Security IDaaS guide, which handles all trusted HCSC issuers centrally.
+1. Issuer: The DeliA API validates the token issuer against a hard-coded list, and PlanetHCSC's issuer is not on it. Proposed fix: verify every token through SEC Token Verify (v6), as recommended by the API Security IDaaS guide, which handles all trusted HCSC issuers centrally.
 
-2. Audience: CoreAPI only accepts tokens issued to DeliA's client ID, so PlanetHCSC tokens fail with "Audience doesn't match". Proposed fix: allow CoreAPI to accept a configured list of client IDs instead of a single one.
+2. Audience: The DeliA API only accepts tokens issued to DeliA's client ID, so PlanetHCSC tokens fail with "Audience doesn't match". Proposed fix: allow the DeliA API to accept a configured list of client IDs instead of a single one.
 
 The document covers both problems, the proposed fixes, the end-to-end flow and a sample request.
 
-Please note that the PlanetHCSC team is still working on adding the required roles and claims to their token. Once that is in place, their users will be able to pass CoreAPI's role-based authorization as well.
+Please note that the PlanetHCSC team is still working on adding the required roles and claims to their token. Once that is in place, their users will also pass DeliA's role-based authorization.
 
 Please let us know if you have any questions or feedback.
 
