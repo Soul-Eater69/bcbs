@@ -1,6 +1,9 @@
-For the strict Finalized set (117 ERs, files under <ER>/Finalized Artifacts), using existing results only (no new downloads unless missing):
-1. In-scope and excluded files by extension and by category, with file and ER counts.
-2. Usable (in-scope) files per ER: mean, median, p90, max, and buckets 0 / 1 / 2–3 / 4–5 / 6–10 / 11+.
-3. Tokens per ER: mean and max, plus the 10 largest ERs.
-4. Card counts: files and ERs matching value\s*card, idea\s*card, and value\s*case, reported separately. Confirm which pattern gave "6 files / 5 ERs".
-5. Embedded images per ER: mean, median, p90, and % of files with images.
+Extend the Finalized analysis to Working Artifacts. Do not edit any report. Never print document text.
+RULE: Working = files whose first folder below the ER is exactly "Working Artifacts" (case-insensitive, trimmed); subfolders count. Same in-scope rules as before.
+Compute for two sets:
+  B1 "Finalized else Working": per ER, use Finalized in-scope files if any, otherwise Working in-scope files.
+  B2 "Finalized + Working": per ER, all in-scope files from both folders.
+For each set report: ERs, total and in-scope files, usable files per ER (mean, median, p90, max, buckets 0/1/2-3/4-5/6-10/11+), file types by category, Idea Card / Value Card / Value Case files and ERs (separately), tokens per ER (mean, median, p90, max, count and % over 24,000), embedded images per ER (mean, median, p90), extraction failures.
+Also for the 47 ERs with both folders: count Working files whose name (ignoring version suffixes like v1, v2, draft, final) matches a Finalized file in the same ER.
+Reuse eda4_finalized_tokens.csv for files already processed; download and count only new Working files, 4 workers, checkpointed to eda5_working_tokens.csv. Run 30 files first and report a time estimate.
+Save eda5_b1_ers.csv, eda5_b2_ers.csv, and a side-by-side table: Finalized only vs B1 vs B2.
