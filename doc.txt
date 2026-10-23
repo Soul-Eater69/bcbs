@@ -1,20 +1,16 @@
-Review: DeliA token validation changes for PlanetHCSC integration
+Token analysis: Finalized only vs B1 vs B2. Use existing checkpoints only (eda4_finalized_tokens.csv, eda5_working_tokens.csv). Do not download anything. Do not edit any report. Never print document text.
 
-Hi Deba,
+Sets (strict top-level folder rule, in-scope files only, text tokens with tiktoken cl100k_base):
+  A  = Finalized only
+  B1 = Finalized, else Working (Working used only when the ER has no in-scope Finalized files)
+  B2 = Finalized + Working (all in-scope files from both folders)
 
-Please find attached the proposal for enabling PlanetHCSC to integrate with the DeliA API, for your review.
+1. Tokens per ER for A, B1 and B2, side by side. Compute each two ways: over ERs with ≥1 usable file, and over all ERs in the set (zeros included). Report: ERs, mean, median, p75, p90, p95, max, ERs over 24,000 (count and %), and total tokens.
+2. Buckets of tokens per ER for each set: 0, 1–2K, 2–5K, 5–10K, 10–15K, 15–24K, 24K+ (ER counts).
+3. The 151 ERs that B1 adds from Working: tokens per ER (mean, median, p90, max), compared with the 102 Finalized ERs.
+4. The 47 ERs with both folders: tokens per ER under A vs B2, extra tokens B2 adds (mean, median, max), and how many of those ERs B2 pushes over 24K. Tokens in the 26 Working files whose names match a Finalized file (versions/duplicates).
+5. Tokens per file by category (presentation, PDF, email, Word, other) and by folder (Finalized vs Working): mean, median, p90, max.
+6. The 10 largest ERs under B2: ER name, files, tokens, and the share coming from Working.
+7. Extraction failures by set, so token totals can be read with them in mind.
 
-Brief context: PlanetHCSC is integrating DeliA capabilities into its mobile app. Its users sign in through PlanetHCSC's own ForgeRock client, and the DeliA API currently rejects these tokens even though they are valid. We found two causes:
-
-1. Issuer: The DeliA API validates the token issuer against a hard-coded list, and PlanetHCSC's issuer is not on it. Proposed fix: verify every token through SEC Token Verify (v6), as recommended by the API Security IDaaS guide, which handles all trusted HCSC issuers centrally.
-
-2. Audience: The DeliA API only accepts tokens issued to DeliA's client ID, so PlanetHCSC tokens fail with "Audience doesn't match". Proposed fix: allow the DeliA API to accept a configured list of client IDs instead of a single one.
-
-The document covers both problems, the proposed fixes, the end-to-end flow and a sample request.
-
-Please note that the PlanetHCSC team is still working on adding the required roles and claims to their token. Once that is in place, their users will also pass DeliA's role-based authorization.
-
-Please let us know if you have any questions or feedback.
-
-Thanks,
-Mahesh
+Save eda5_tokens_comparison.csv and eda5_token_buckets.csv. Finish with a summary of 10 lines or fewer.
