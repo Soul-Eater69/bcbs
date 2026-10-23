@@ -1,9 +1,19 @@
-Extend the Finalized analysis to Working Artifacts. Do not edit any report. Never print document text.
-RULE: Working = files whose first folder below the ER is exactly "Working Artifacts" (case-insensitive, trimmed); subfolders count. Same in-scope rules as before.
-Compute for two sets:
-  B1 "Finalized else Working": per ER, use Finalized in-scope files if any, otherwise Working in-scope files.
-  B2 "Finalized + Working": per ER, all in-scope files from both folders.
-For each set report: ERs, total and in-scope files, usable files per ER (mean, median, p90, max, buckets 0/1/2-3/4-5/6-10/11+), file types by category, Idea Card / Value Card / Value Case files and ERs (separately), tokens per ER (mean, median, p90, max, count and % over 24,000), embedded images per ER (mean, median, p90), extraction failures.
-Also for the 47 ERs with both folders: count Working files whose name (ignoring version suffixes like v1, v2, draft, final) matches a Finalized file in the same ER.
-Reuse eda4_finalized_tokens.csv for files already processed; download and count only new Working files, 4 workers, checkpointed to eda5_working_tokens.csv. Run 30 files first and report a time estimate.
-Save eda5_b1_ers.csv, eda5_b2_ers.csv, and a side-by-side table: Finalized only vs B1 vs B2.
+Review: CoreAPI token validation changes for PlanetHCSC integration
+Hi Deba,
+
+Please find attached the proposal for enabling PlanetHCSC to call CoreAPI, for your review.
+
+Brief context: PlanetHCSC is integrating DeliA capabilities into its mobile app. Its users sign in through PlanetHCSC's own ForgeRock client, and CoreAPI currently rejects these tokens even though they are valid. We found two causes:
+
+1. Issuer: CoreAPI validates the token issuer against a hard-coded list, and PlanetHCSC's issuer is not on it. Proposed fix: verify every token through SEC Token Verify (v6), as recommended by the API Security IDaaS guide, which handles all trusted HCSC issuers centrally.
+
+2. Audience: CoreAPI only accepts tokens issued to DeliA's client ID, so PlanetHCSC tokens fail with "Audience doesn't match". Proposed fix: allow CoreAPI to accept a configured list of client IDs instead of a single one.
+
+The document covers both problems, the proposed fixes, the end-to-end flow and a sample request.
+
+Please note that the PlanetHCSC team is still working on adding the required roles and claims to their token. Once that is in place, their users will be able to pass CoreAPI's role-based authorization as well.
+
+Please let us know if you have any questions or feedback.
+
+Thanks,
+Mahesh
