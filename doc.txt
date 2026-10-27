@@ -1,19 +1,19 @@
-Intake artifacts: two questions on folders and file naming
+5. Number of files used per ER
+On average, an ER has about 2 usable files.
 
+Finalized only: median 2, average 2.3, max 17 (100 ERs)
+Finalized + Working: median 2, average 3.3, max 46 (236 ERs)
 
-Hi Sanjay,
+6. Any identifier that would help identify the value card, like a specific naming convention
+There is no consistent naming convention today.
 
-Two questions from the intake artifacts analysis:
+No file is named “Value Card”.
+Idea Card or Value Case appears in the file name for 15 of 100 ERs (Finalized only), or 90 of 236 ERs when Working is included.
+Without a convention, value cards can’t be reliably identified by file name. A naming convention would be needed (requested from the business).
 
-1. Reading both folders
-- Relevant files are in both Finalized Artifacts and Working Artifacts. Many ERs keep their key documents, such as Idea Cards and Value Cases, only in Working.
-- Can we always read both folders, rather than reading Working only when Finalized is empty?
+7. Do we need to revisit the token count threshold based on the analysis?
+No, the 24K limit covers almost all ERs.
 
-2. Naming convention for key documents
-- We already know which documents we need: Value Card / Value Case, Candidate Architecture, Data Architecture and kickoff slides.
-- Today these files can't be identified reliably by name, so we have to process all files in the folders to find them.
-- Could these documents follow a consistent naming convention, so we can pick up only those files and skip unnecessary processing?
-- For existing ERs, is there another way to identify these documents, such as a document-type field in Planview?
-
-Thanks,
-Mahesh
+Finalized only: median 4.6K tokens per ER, 90th percentile 12.3K; 2 ERs exceed 24K.
+Finalized + Working: median 3.1K, 90th percentile 17.8K; 16 ERs exceed 24K.
+The few ERs above 24K would need file prioritisation or trimming. Counts use the GPT-5 mini tokenizer on text only; images are not included.
