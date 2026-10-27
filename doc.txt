@@ -1,3 +1,4 @@
-Print, without new processing:
-1. eda5_images_per_er_summary.csv and eda5_images_by_extension.csv in full (A / B1 / B2, raw and cleaned, mean / median / p90 / max).
-2. If a per-image file exists from the cleaning step (with sha256, bytes, width, height per image), use it to report images removed by small size only, shared-across-3+-ERs only, and both, per set; and the 10 most-shared hashes with the number of ERs and files each appears in. If no such file exists, say so and do not recompute.
+From eda5_b1_ers.csv and eda5_b2_ers.csv (no new processing), print files per ER for B1 and B2, alongside A from eda4_finalized_ers.csv:
+- All files (including excluded types) and usable (in-scope) files per ER: ERs, mean, median, p90, max — over ERs with ≥1 selected file.
+- Usable files per ER buckets: 0, 1, 2–3, 4–5, 6–10, 11+.
+- Confirm why B1 has 262 ERs with selected files and B2 has 267: list the ERs in B2 but not B1 and what their Finalized folder contains.
