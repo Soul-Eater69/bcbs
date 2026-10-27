@@ -1,13 +1,19 @@
-Recompute all A / B1 / B2 results with Email (.msg, .eml) and Other (.zip, .one, .vsd, any non-office/PDF/image file) now OUT of scope. In scope = presentations, PDF, Word, images only. Use existing checkpoints (eda6_content.csv, image files); no downloads; no document text; do not edit any report.
+Intake artifacts: two questions on folders and file naming
 
-For A, B1, B2 side by side:
-1. ERs with any file / ERs with usable files / ERs without usable files.
-2. Usable files per ER (over ERs with any file in the set): mean, median, p90, max; buckets 0, 1, 2–3, 4–5, 6–10, 11+.
-3. Extraction of in-scope files: text extracted (count and %), empty text, image-only, failed; files under 50 o200k tokens; likely scanned PDFs; slides with images and under 20 characters.
-4. Tokens per ER, o200k_base (ERs with usable files): ERs, mean, median, p90, p95, max, total, and count of ERs over 24,000.
-5. Images per ER (ERs with image-capable files) raw and cleaned: mean, median, p90, max. Per file raw and cleaned by set and by extension (.pptx, .pdf, .docx), with % of files with ≥1 image and raw → cleaned totals.
-6. Cards by file name (idea\s*card, value\s*card, value\s*case): files / ERs, ERs with any card, ERs with none (out of ERs with usable files).
-7. CA / DA by file name: files / ERs.
-8. Depth (files at 0 / 1 / 2 / 3+ below the folder) and duplicates (identical name+size; same name after removing version suffixes).
-9. Show which numbers changed versus the previous run.
-Save eda7_summary.csv. Finish with a summary of 15 lines or fewer.
+
+Hi Sanjay,
+
+Two questions from the intake artifacts analysis:
+
+1. Reading both folders
+- Relevant files are in both Finalized Artifacts and Working Artifacts. Many ERs keep their key documents, such as Idea Cards and Value Cases, only in Working.
+- Can we always read both folders, rather than reading Working only when Finalized is empty?
+
+2. Naming convention for key documents
+- We already know which documents we need: Value Card / Value Case, Candidate Architecture, Data Architecture and kickoff slides.
+- Today these files can't be identified reliably by name, so we have to process all files in the folders to find them.
+- Could these documents follow a consistent naming convention, so we can pick up only those files and skip unnecessary processing?
+- For existing ERs, is there another way to identify these documents, such as a document-type field in Planview?
+
+Thanks,
+Mahesh
