@@ -1,31 +1,13 @@
-COMPLETE THE A / B1 / B2 ANALYSIS. Do not edit any report. Never print or save document text.
+Recompute all A / B1 / B2 results with Email (.msg, .eml) and Other (.zip, .one, .vsd, any non-office/PDF/image file) now OUT of scope. In scope = presentations, PDF, Word, images only. Use existing checkpoints (eda6_content.csv, image files); no downloads; no document text; do not edit any report.
 
-Sets (strict rule: first folder below the ER is exactly "Finalized Artifacts" / "Working Artifacts", case-insensitive, subfolders included):
-  A  = Finalized only
-  B1 = Finalized if it has in-scope files, else Working
-  B2 = Finalized + Working
-In-scope = not Excel, not Gate 0/1 estimates (gate\s*[01], ClassicHEM, SlimHEM, estimate), not Stakeholder Engagement Workbook, not BOM, not templates (I0000000, I000000, "template").
-Report EVERY section for A, B1 and B2 side by side. Where useful, also split B2 by folder (Finalized vs Working).
-
-PASS 1 — METADATA ONLY (no downloads)
-1. File types: files and ERs by category (Presentation, PDF, Word, Email, Image, Other, Excel, Gate estimate, Template, BOM, Stakeholder) AND by extension. List every extension inside "Other" and "Email" with counts.
-2. Usable vs readable: in-scope files, files that extracted text successfully, failures by extension and reason. Reconcile set A failures (16 in eda4 vs 12 in eda5) and list the 4 files that differ.
-3. Cards by file name, three patterns reported separately (do not count bare "VC"): idea\s*card, value\s*card, value\s*case. Files and ERs per pattern; ERs with any card; ERs with none. Print the matched file names for value\s*card and value\s*case so they can be compared.
-4. CA / DA by file name: candidate\s*arch | (^|[\s_\-])CA([\s_\-]+(v?\d|doc|diagram|deck)|[\s_\-]*\.(pptx|docx|pdf|vsdx)$) and data\s*arch | (^|[\s_\-])DA([\s_\-]+(v?\d|doc|diagram|deck|ver)|[\s_\-]*\.(pptx|docx|pdf|vsdx)$). Files and ERs; print matched names.
-5. Subfolder depth below the Finalized / Working folder: files at depth 0, 1, 2, 3+; top 10 subfolder names at depth 1 (flag "Archive").
-6. Duplicates: within each ER and set, files with identical name+size, and files whose names match after removing version suffixes (v1, v2, draft, final, dates, "(1)"). Counts of files and ERs affected.
-7. Dates: lastModified distribution per set (median age, % modified in last 6 / 12 / 24 months), and the oldest and newest file per set.
-
-PASS 2 — CONTENT (re-download in-scope files to memory; 4 workers; honour Retry-After; checkpoint to eda6_content.csv and resume by item_id; run 30 files first and give a time estimate)
-8. Tokens with BOTH tiktoken "cl100k_base" and "o200k_base" (o200k = GPT-5 mini) per file, using the same extraction code as before.
-   - Per ER (ERs with ≥1 usable file): mean, median, p75, p90, p95, max, count and % over 24,000, total tokens — for both encodings.
-   - Buckets per ER: 0, 1–2K, 2–5K, 5–10K, 10–15K, 15–24K, 24K+.
-   - Per file by category and extension: mean, median, p90, max.
-   - o200k / cl100k ratio overall and by extension.
-   - Top 10 ERs and top 10 files by o200k tokens (names, type, folder).
-9. Low-text files: in-scope files with fewer than 50 tokens, by extension; PDFs with fewer than 20 characters per page (likely scanned); slides with images but under 20 characters of text.
-10. Email attachments: for each .msg, count attachments and their extensions (metadata only, do not open them).
-
-OUTPUT
-- One CSV per section (eda6_*.csv) and one combined side-by-side table eda6_summary.csv.
-- Finish with a summary of 15 lines or fewer, A / B1 / B2 on each line.
+For A, B1, B2 side by side:
+1. ERs with any file / ERs with usable files / ERs without usable files.
+2. Usable files per ER (over ERs with any file in the set): mean, median, p90, max; buckets 0, 1, 2–3, 4–5, 6–10, 11+.
+3. Extraction of in-scope files: text extracted (count and %), empty text, image-only, failed; files under 50 o200k tokens; likely scanned PDFs; slides with images and under 20 characters.
+4. Tokens per ER, o200k_base (ERs with usable files): ERs, mean, median, p90, p95, max, total, and count of ERs over 24,000.
+5. Images per ER (ERs with image-capable files) raw and cleaned: mean, median, p90, max. Per file raw and cleaned by set and by extension (.pptx, .pdf, .docx), with % of files with ≥1 image and raw → cleaned totals.
+6. Cards by file name (idea\s*card, value\s*card, value\s*case): files / ERs, ERs with any card, ERs with none (out of ERs with usable files).
+7. CA / DA by file name: files / ERs.
+8. Depth (files at 0 / 1 / 2 / 3+ below the folder) and duplicates (identical name+size; same name after removing version suffixes).
+9. Show which numbers changed versus the previous run.
+Save eda7_summary.csv. Finish with a summary of 15 lines or fewer.
