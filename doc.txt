@@ -1,19 +1,10 @@
-5. Number of files used per ER
-On average, an ER has about 2 usable files.
+1. Planview fallback
+- When an ER has no usable files, we'll fall back to the Planview Work Entry details.
+- Which Planview fields should we use for this (for example description, business problem, objectives, scope)?
 
-Finalized only: median 2, average 2.3, max 17 (100 ERs)
-Finalized + Working: median 2, average 3.3, max 46 (236 ERs)
+2. Value Card naming
+- Is there an existing or planned naming convention for Value Cards?
+- If so, could you share the format, or a few example file names, so we can identify them reliably?
 
-6. Any identifier that would help identify the value card, like a specific naming convention
-There is no consistent naming convention today.
-
-No file is named “Value Card”.
-Idea Card or Value Case appears in the file name for 15 of 100 ERs (Finalized only), or 90 of 236 ERs when Working is included.
-Without a convention, value cards can’t be reliably identified by file name. A naming convention would be needed (requested from the business).
-
-7. Do we need to revisit the token count threshold based on the analysis?
-No, the 24K limit covers almost all ERs.
-
-Finalized only: median 4.6K tokens per ER, 90th percentile 12.3K; 2 ERs exceed 24K.
-Finalized + Working: median 3.1K, 90th percentile 17.8K; 16 ERs exceed 24K.
-The few ERs above 24K would need file prioritisation or trimming. Counts use the GPT-5 mini tokenizer on text only; images are not included.
+Thanks,
+Mahesh
