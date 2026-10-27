@@ -1,9 +1,25 @@
-Image analysis for A (Finalized only), B1 (Finalized else Working), B2 (Finalized + Working). Use existing checkpoints only (eda4_finalized_tokens.csv, eda5_working_tokens.csv); if per-image detail is missing, re-open only the image-capable files (.pptx, .docx, .pdf) to count media — no text extraction. Do not edit any report. Never print document text.
+Image analysis summary from eda5_images_per_er.csv and eda5_images_per_file.csv only. No new processing, no downloads, no document text. Do not edit any report.
 
-1. Per work item (ER), for each set: ERs, mean, median, p75, p90, max images; ER counts in buckets 0, 1–10, 11–50, 51–100, 101–250, 251+.
-2. Per file, for each set: image-capable files, % with ≥1 image, mean, median, p90, max images per file; split by extension (.pptx, .docx, .pdf) and by folder (Finalized vs Working).
-3. Cleaned counts: for each image record bytes, width, height, sha256. Report per ER and per file again after removing (a) images under 10 KB or with a side under 150 px, and (b) images whose sha256 appears in 3 or more ERs (logos / template graphics). Show raw vs cleaned side by side.
-4. Top 10 ERs and top 10 files by raw image count under B2, with file type and folder.
-5. Images by doc type: Idea Card, Value Card, Value Case files vs all others (mean and median per file).
+Sets: A = Finalized only, B1 = Finalized else Working, B2 = Finalized + Working (strict top-level folder rule).
+"Cleaned" = after removing images under 10 KB or with a side under 150 px, and images whose sha256 appears in 3+ ERs.
 
-Save eda5_images_per_er.csv, eda5_images_per_file.csv, eda5_images_raw_vs_clean.csv. Finish with a summary of 10 lines or fewer.
+1. PER ER (only ERs with ≥1 image-capable file, not all 782)
+For A, B1, B2, raw and cleaned: ERs, mean, median, p90, max images per ER.
+
+2. PER FILE, BY EXTENSION
+For A, B1, B2, and for each extension (.pptx, .docx, .pdf, plus any other image-capable type):
+- files inspected
+- % of files with ≥1 image
+- raw images per file: mean, median, p90, max
+- cleaned images per file: mean, median, p90, max
+- total raw images, total cleaned images, % kept
+Also split B2 by folder (Finalized vs Working) with the same columns.
+
+3. CLEANING RULES
+- Images removed by small size only, by shared-across-3+-ERs only, and by both (counts and % of raw), per set.
+- The 10 most-shared hashes: number of ERs and files each appears in, typical dimensions and bytes, and the most common extension (counts only, no image content).
+
+OUTPUT
+- Print one table per section, A / B1 / B2 side by side where possible.
+- Save eda5_images_per_er_summary.csv, eda5_images_by_extension.csv, eda5_images_cleaning_rules.csv.
+- Finish with a summary of 10 lines or fewer.
