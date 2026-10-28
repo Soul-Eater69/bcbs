@@ -1,10 +1,6 @@
-1. Planview fallback
-- When an ER has no usable files, we'll fall back to the Planview Work Entry details.
-- Which Planview fields should we use for this (for example description, business problem, objectives, scope)?
-
-2. Value Card naming
-- Is there an existing or planned naming convention for Value Cards?
-- If so, could you share the format, or a few example file names, so we can identify them reliably?
-
-Thanks,
-Mahesh
+From eda8_delia_teg_captions_latest.csv and the image metadata (no new caption calls, no caption text printed):
+1. Caption tokens (o200k_base): per caption mean, median, p90, max. Map each unique hash back to every ER and file it appears in.
+2. Per ER for A, B1, B2 (ERs with usable files): caption tokens and text + caption tokens combined — mean, median, p90, max, and ERs over 24,000. Count each unique image once per ER.
+3. Decorative captions: count captions that are very short (under 15 tokens) or mention only logo, icon, background, banner or decorative graphic, by set and format.
+4. Blur filter audit: blur score distribution for skipped vs captioned images; how many skipped images are 2000x1125 or larger, or come from slides tagged as diagrams; list 20 skipped image hashes with dimensions, bytes, source format and blur score so I can review them visually.
+Save eda8_caption_tokens_per_er.csv and eda8_blur_audit.csv.
